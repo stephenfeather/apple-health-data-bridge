@@ -1,0 +1,27 @@
+{
+  "patients": [ { "name": "Jane Public", "dob": "2000-01-01" } ],
+  "observations": [
+    {
+      "loinc": "29463-7",
+      "display": "Body weight",
+      "value": 72.5,
+      "unit": "kg",
+      "effectiveDate": "2024-01-15",
+      "category": "vital",
+      "confidence": 0.9,
+      "page": 1,
+      "snippet": "Body weight 72.5 kg"
+    },
+    {
+      "loinc": "1742-6",
+      "display": "ALT",
+      "value": 22,
+      "unit": "U/L",
+      "effectiveDate": "2024-01-15",
+      "category": "lab",
+      "confidence": 0.7,
+      "page": 1,
+      "snippet": "ALT 22 U/L"
+    }
+  ]
+}

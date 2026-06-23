@@ -1,7 +1,13 @@
 import XCTest
+import BridgeKit
 @testable import HealthBridgeParsing
 
 final class LLMResponseContractTests: XCTestCase {
+
+    private func fixtureText(_ n: String) throws -> String {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "Fixtures/\(n)", withExtension: "json"))
+        return try String(contentsOf: url, encoding: .utf8)
+    }
 
     // MARK: - Value types
 
@@ -62,5 +68,53 @@ final class LLMResponseContractTests: XCTestCase {
         let p = ExtractionPrompt.make(pages: ["Body weight 72.5 kg", "ALT 22 U/L"])
         XCTAssertTrue(p.contains("72.5"))
         XCTAssertTrue(p.contains("ALT 22 U/L"))
+    }
+
+    // MARK: - LLMResponseContract.decode (untrusted output — error handlers first)
+
+    func testMalformedJSONThrows() {
+        XCTAssertThrowsError(try LLMResponseContract.decode("not json{", subjectId: "s")) {
+            guard case ParseError.malformed = $0 else { return XCTFail("expected .malformed") }
+        }
+    }
+
+    func testMissingFieldsBecomeSkips() throws {
+        let r = try LLMResponseContract.decode(try fixtureText("llm-response-missing-fields"), subjectId: "s")
+        XCTAssertEqual(r.observations.count, 0)
+        XCTAssertTrue(r.skipped.contains { $0.reason == .noCode })
+        XCTAssertTrue(r.skipped.contains { $0.reason == .noDate })
+        XCTAssertTrue(r.skipped.contains { $0.reason == .unrepresentableValue })
+    }
+
+    func testOutOfRangeConfidenceRejectedNotClamped() throws {
+        let r = try LLMResponseContract.decode(try fixtureText("llm-response-bad-confidence"), subjectId: "s")
+        XCTAssertEqual(r.observations.count, 0)              // both rejected, NOT clamped to 1.0/0.0
+        XCTAssertEqual(r.skipped.count, 2)
+    }
+
+    func testValidResponseProducesObservations() throws {
+        let r = try LLMResponseContract.decode(try fixtureText("llm-response-valid"), subjectId: "s")
+        let vital = try XCTUnwrap(r.observations.first { $0.category == .vital })
+        XCTAssertEqual(vital.code?.system, "http://loinc.org")
+        XCTAssertEqual(vital.code?.code, "29463-7")
+        XCTAssertEqual(vital.confidence, 0.9, accuracy: 1e-9)
+        XCTAssertEqual(vital.unit, "kg")
+        XCTAssertNil(vital.mapping)
+        XCTAssertEqual(vital.sourceLocator?.page, 1)
+        XCTAssertEqual(vital.sourceLocator?.snippet, "Body weight 72.5 kg")
+        let lab = try XCTUnwrap(r.observations.first { $0.category == .lab })
+        XCTAssertEqual(lab.confidence, 0.7, accuracy: 1e-9)
+    }
+
+    /// id-parity: a body weight extracted from a PDF must derive the SAME id as the identical content
+    /// from FHIR/C-CDA — same subject+system+code+date+rawValue(stableNumberString)+unit.
+    func testIdMatchesDerivationForSameContent() throws {
+        let r = try LLMResponseContract.decode(try fixtureText("llm-response-valid"), subjectId: "s")
+        let o = try XCTUnwrap(r.observations.first { $0.category == .vital })
+        let expected = ObservationID.derive(subjectId: "s", system: "http://loinc.org", code: "29463-7",
+                                            effectiveDate: o.effectiveDate,
+                                            rawValue: stableNumberString(72.5), unit: "kg")
+        XCTAssertEqual(o.id, expected)
+        XCTAssertFalse(o.id.isEmpty)
     }
 }

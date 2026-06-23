@@ -1,0 +1,23 @@
+{
+  "patients": [ { "name": "Jane Public", "dob": "2000-01-01" } ],
+  "observations": [
+    {
+      "loinc": "29463-7",
+      "display": "Body weight (over-confident)",
+      "value": 72.5,
+      "unit": "kg",
+      "effectiveDate": "2024-01-15",
+      "category": "vital",
+      "confidence": 1.4
+    },
+    {
+      "loinc": "1742-6",
+      "display": "ALT (negative confidence)",
+      "value": 22,
+      "unit": "U/L",
+      "effectiveDate": "2024-01-15",
+      "category": "lab",
+      "confidence": -0.1
+    }
+  ]
+}
