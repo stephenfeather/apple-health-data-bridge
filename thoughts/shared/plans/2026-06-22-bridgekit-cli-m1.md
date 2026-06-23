@@ -19,7 +19,7 @@
 - LOINC system URI is the string **`http://loinc.org`**.
 - **No network in tests.** All FHIR fixtures are checked-in JSON files. **No PHI** in the repo — fixtures are synthetic or drawn from public FHIR examples.
 - TDD throughout: failing test first, minimal implementation, green, commit. Commit after every task.
-- **Commit protocol (OVERRIDES the per-step `git commit` lines):** All implementation runs in a **git worktree on a feature branch** (never on `main`). Each task's "Commit" step means: `git add <the exact files listed>` (use `git rm` for deletions), then **`github-agent-commit "<the message shown>"`** — NOT plain `git commit` (the repo forbids unsigned commits, and the signed helper refuses `main`). After `github-agent-commit` returns, it resets the local branch to `origin/<branch>`, so **stage every intended change before committing** (unstaged tracked edits are wiped; untracked/`.build` artifacts survive). Before the first commit, confirm `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY` are set in the shell (they load via the repo `.envrc`/direnv); if empty, stop and report rather than falling back to `git commit`. The whole milestone lands as **one PR** to `main` at the end via `agent-gh pr create`.
+- **Commit protocol — NEVER run `git commit` or `git push`.** All implementation runs in a **git worktree on a feature branch** (never on `main`). Each task's "Commit" step uses the GitHub-App helpers, exactly as written: `git add <the exact files listed>` (and `git rm` for deletions) to stage — this staging is the ONLY raw git permitted, because `github-agent-commit` reads `git diff --cached` and has no stage-it-yourself mode — then **`github-agent-commit "<message>"`** (signed, refuses `main`, auto-creates the remote branch). Do NOT run `git commit`, `git push`, `git fetch`, `git reset`, `git checkout`, or `git update-ref` — `github-agent-commit` already resets the local branch to `origin/<branch>` after committing (so **stage every intended change first**; unstaged tracked edits are wiped, untracked/`.build` artifacts survive). Read-only `git status`/`git diff` for inspection is fine. Before the first commit, confirm `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY` are set (they load via the repo `.envrc`/direnv); if empty, STOP and report — never fall back to `git commit`. All GitHub API / PR operations use **`agent-gh`**, never raw `gh`. The whole milestone lands as **one PR** to `main` at the end via `agent-gh pr create … --body-file <file>`.
 
 ---
 
@@ -167,7 +167,7 @@ Expected: PASS.
 
 ```
 git add Package.swift Package.resolved Sources Tests
-git commit -m "chore: scaffold SwiftPM package with BridgeKit, HealthBridgeParsing, healthbridge targets"
+github-agent-commit "chore: scaffold SwiftPM package with BridgeKit, HealthBridgeParsing, healthbridge targets"
 ```
 
 ---
@@ -429,7 +429,7 @@ Expected: all three tests PASS.
 
 ```
 git add Sources/BridgeKit Tests/BridgeKitTests/BridgeDocumentCodingTests.swift
-git commit -m "feat(bridgekit): Bridge Document schema with deterministic JSON encoding"
+github-agent-commit "feat(bridgekit): Bridge Document schema with deterministic JSON encoding"
 ```
 
 ---
@@ -521,7 +521,7 @@ Expected: all three PASS.
 
 ```
 git add Sources/BridgeKit/ObservationID.swift Tests/BridgeKitTests/ObservationIDTests.swift
-git commit -m "feat(bridgekit): deterministic SHA-256 observation ID derivation"
+github-agent-commit "feat(bridgekit): deterministic SHA-256 observation ID derivation"
 ```
 
 ---
@@ -686,7 +686,7 @@ Expected: all six PASS.
 
 ```
 git add Sources/BridgeKit/MappingTable.swift Tests/BridgeKitTests/MappingTableTests.swift
-git commit -m "feat(bridgekit): LOINC to HealthKit mapping table with unit conversion"
+github-agent-commit "feat(bridgekit): LOINC to HealthKit mapping table with unit conversion"
 ```
 
 ---
@@ -820,7 +820,7 @@ Expected: every BridgeKit test PASSES.
 
 ```
 git add Sources/BridgeKit/Validation.swift Tests/BridgeKitTests/ValidationTests.swift
-git commit -m "feat(bridgekit): Bridge Document validation rules"
+github-agent-commit "feat(bridgekit): Bridge Document validation rules"
 ```
 
 ---
@@ -910,7 +910,7 @@ Expected: both PASS.
 ```
 git add Package.swift Sources/HealthBridgeParsing/DocumentParser.swift Tests/HealthBridgeParsingTests/DocumentParserTests.swift
 git rm Sources/HealthBridgeParsing/Placeholder.swift
-git commit -m "feat(parsing): DocumentParser protocol and ParseError"
+github-agent-commit "feat(parsing): DocumentParser protocol and ParseError"
 ```
 
 ---
@@ -1196,7 +1196,7 @@ Expected: all five PASS.
 
 ```
 git add Package.swift Sources/HealthBridgeParsing/FHIRParser.swift Tests/HealthBridgeParsingTests
-git commit -m "feat(parsing): FHIR R4 JSON parser for Observation and Bundle resources"
+github-agent-commit "feat(parsing): FHIR R4 JSON parser for Observation and Bundle resources"
 ```
 
 ---
@@ -1394,7 +1394,7 @@ Expected: every test in `BridgeKitTests`, `HealthBridgeParsingTests`, and `healt
 ```
 git add Package.swift Sources/healthbridge/HealthBridge.swift Tests/healthbridgeTests
 git rm Sources/healthbridge/main.swift
-git commit -m "feat(cli): healthbridge parse command producing validated Bridge Documents"
+github-agent-commit "feat(cli): healthbridge parse command producing validated Bridge Documents"
 ```
 
 ---
