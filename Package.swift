@@ -32,7 +32,7 @@ let package = Package(
         ),
         .testTarget(name: "BridgeKitTests", dependencies: ["BridgeKit"]),
         .testTarget(name: "HealthBridgeConfigTests", dependencies: ["HealthBridgeConfig"]),
-        // HealthBridgeParsingTests in Task 8;
+        .testTarget(name: "HealthBridgeParsingTests", dependencies: ["HealthBridgeParsing", "BridgeKit"]),
         // healthbridgeTests in Task 9. A test target with no .swift sources fails to build,
         // so each is declared in the task that creates its first test file.
     ]
