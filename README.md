@@ -26,4 +26,4 @@ Early development. See `docs/superpowers/specs/` for the design.
 
 ## License
 
-TBD
+[MIT](LICENSE) © 2026 Stephen Feather. Provided "as is", without warranty of any kind (see the disclaimer above and the `LICENSE` file).
