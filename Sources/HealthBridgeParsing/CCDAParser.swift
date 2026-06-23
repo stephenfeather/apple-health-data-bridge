@@ -115,7 +115,7 @@ public struct CCDAParser: DocumentParser {
                 skips.append(Skip(reason: .noDate, label: display)); continue
             }
             let valueEl = CDAXML.child(observation, localName: "value")
-            let text = valueEl.flatMap { CDAXML.attr($0, "displayName") } ?? display
+            let text = valueText(valueEl) ?? display
             let id = ObservationID.derive(subjectId: subjectId, system: Self.loincURI, code: code,
                                           effectiveDate: date, rawValue: text, unit: nil)
             obs.append(Observation(id: id, code: CodeableRef(system: Self.loincURI, code: code, display: display),
@@ -123,6 +123,15 @@ public struct CCDAParser: DocumentParser {
                                    category: .other, mapping: nil, confidence: 1.0, sourceLocator: nil))
         }
         return (obs, skips)
+    }
+
+    /// Qualitative display text: prefer the value's @displayName (CD/coded), else its element text
+    /// content (ST/free-text values that carry no displayName attribute).
+    private func valueText(_ el: XMLElement?) -> String? {
+        guard let el else { return nil }
+        if let dn = CDAXML.attr(el, "displayName"), !dn.isEmpty { return dn }
+        let s = el.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (s?.isEmpty == false) ? s : nil
     }
 
     // MARK: HL7 TS date — UTC for timezone-less/date-only (parity with FHIRDate)

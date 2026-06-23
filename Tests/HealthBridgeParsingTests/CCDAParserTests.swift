@@ -101,5 +101,31 @@ final class CCDAParserTests: XCTestCase {
         XCTAssertEqual(r.observations.count, 0)
         XCTAssertEqual(r.skipped.first?.reason, .noCode)
     }
+    // MARK: Results / Problems / Allergies
+    func testParsesLabResult() throws {
+        let o = try XCTUnwrap(try parse("ccda-results").observations.first { $0.code?.code == "1742-6" })
+        XCTAssertEqual(o.category, .lab); XCTAssertEqual(o.value, .quantity(22)); XCTAssertEqual(o.unit, "U/L")
+    }
+    func testParsesProblemAsStringOther() throws {
+        let o = try XCTUnwrap(try parse("ccda-problems").observations.first)
+        XCTAssertEqual(o.category, .other)
+        if case .string(let s) = o.value { XCTAssertEqual(s, "Hypertension") } else { XCTFail("expected .string") }
+        XCTAssertNil(o.mapping)
+    }
+    func testParsesAllergyAsStringOther() throws {
+        let o = try XCTUnwrap(try parse("ccda-allergies").observations.first)
+        XCTAssertEqual(o.category, .other)
+        // ST value has no displayName -> stringValue text fallback must surface the reaction text.
+        if case .string(let s) = o.value { XCTAssertEqual(s, "Penicillin - hives") } else { XCTFail("expected .string") }
+    }
+    func testMissingSectionsYieldsNoObservationsNoThrow() throws {
+        let r = try parse("ccda-missing-sections")
+        XCTAssertEqual(r.observations.count, 0); XCTAssertEqual(r.skipped.count, 0)
+    }
+    func testMinimalCarriesBothVitalAndResult() throws {
+        let r = try parse("ccda-minimal")
+        XCTAssertEqual(Set(r.observations.compactMap { $0.code?.code }), ["29463-7", "1742-6"])
+        XCTAssertEqual(r.observations.first { $0.code?.code == "1742-6" }?.category, .lab)
+    }
 }
 #endif
