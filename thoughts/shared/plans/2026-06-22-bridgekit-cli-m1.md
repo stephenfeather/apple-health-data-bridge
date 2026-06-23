@@ -18,7 +18,8 @@
 - FHIR-derived observations always carry `confidence = 1.0`.
 - LOINC system URI is the string **`http://loinc.org`**.
 - **No network in tests.** All FHIR fixtures are checked-in JSON files. **No PHI** in the repo — fixtures are synthetic or drawn from public FHIR examples.
-- TDD throughout: failing test first, minimal implementation, green, commit. Commit after every task with `git`-style messages shown in steps. (Plan commits and code commits land per the repo's commit rules.)
+- TDD throughout: failing test first, minimal implementation, green, commit. Commit after every task.
+- **Commit protocol (OVERRIDES the per-step `git commit` lines):** All implementation runs in a **git worktree on a feature branch** (never on `main`). Each task's "Commit" step means: `git add <the exact files listed>` (use `git rm` for deletions), then **`github-agent-commit "<the message shown>"`** — NOT plain `git commit` (the repo forbids unsigned commits, and the signed helper refuses `main`). After `github-agent-commit` returns, it resets the local branch to `origin/<branch>`, so **stage every intended change before committing** (unstaged tracked edits are wiped; untracked/`.build` artifacts survive). Before the first commit, confirm `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY` are set in the shell (they load via the repo `.envrc`/direnv); if empty, stop and report rather than falling back to `git commit`. The whole milestone lands as **one PR** to `main` at the end via `agent-gh pr create`.
 
 ---
 
