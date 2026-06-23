@@ -60,5 +60,25 @@ final class CCDAParserTests: XCTestCase {
         XCTAssertEqual(stableNumberString(72), "72")
         XCTAssertEqual(stableNumberString(72.5), "72.5")
     }
+    // MARK: multi-patient refusal (PHI-safety parity with M1)
+    func testRefusesMultiplePatients() throws {
+        XCTAssertThrowsError(try parse("ccda-multi-patient")) {
+            guard case ParseError.malformed(let m) = $0 else { return XCTFail("expected .malformed") }
+            XCTAssertTrue(m.lowercased().contains("patient"), m)
+        }
+    }
+    func testAcceptsSinglePatient() throws {
+        XCTAssertNoThrow(try parse("ccda-minimal"))   // exactly one recordTarget
+    }
+    // Adversarial: refusal keys on the COUNT of patients in the document, NOT the subjectId arg —
+    // a 2-patient doc must refuse no matter which subject was selected (the exact cross-patient leak risk).
+    func testRefusalIsIndependentOfSubjectId() throws {
+        let data = try fixture("ccda-multi-patient")
+        for subject in ["jane", "john", "", "anyone"] {
+            XCTAssertThrowsError(try CCDAParser().parse(data, subjectId: subject)) {
+                guard case ParseError.malformed = $0 else { return XCTFail("expected .malformed for subject=\(subject)") }
+            }
+        }
+    }
 }
 #endif

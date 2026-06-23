@@ -147,7 +147,16 @@ public struct CCDAParser: DocumentParser {
         return cal.date(from: c)
     }
 
-    // MARK: single-subject binding (replaced test-first in Task 4)
-    private func enforceSinglePatient(_ root: XMLElement) throws {}
+    // MARK: single-subject binding (PHI-safety parity with M1)
+    /// Conservative single-subject binding: a Bridge Document binds ONE person.
+    /// More than one recordTarget/patientRole is refused (PHI-safety parity with M1). The decision
+    /// is on the COUNT of patients in the document and is independent of the selected subjectId —
+    /// a multi-patient document must never let one subject's selection admit another's observations.
+    private func enforceSinglePatient(_ root: XMLElement) throws {
+        let targets = (try? CDAXML.elements(root, localName: "patientRole")) ?? []
+        if targets.count > 1 {
+            throw ParseError.malformed("C-CDA contains \(targets.count) patients; refusing (one document = one subject)")
+        }
+    }
 }
 #endif
