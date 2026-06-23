@@ -4,7 +4,7 @@
 # Swift Package Manager
 .build/
 .swiftpm/
-Package.resolved
+# Package.resolved is committed for reproducible dependency pins.
 
 # Xcode
 *.xcodeproj/xcuserdata/

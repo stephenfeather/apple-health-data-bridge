@@ -1,0 +1,1 @@
+// BridgeKit — schema, mapping, validation.
