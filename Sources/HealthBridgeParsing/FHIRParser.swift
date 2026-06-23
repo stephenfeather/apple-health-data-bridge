@@ -114,7 +114,10 @@ public struct FHIRParser: DocumentParser {
     }
 
     /// Lossless number rendering for id stability (no %g rounding); integral values drop the .0.
+    /// Guards Int conversion so huge/non-finite Doubles (e.g. 1e20) don't trap.
     private func stableNumberString(_ d: Double) -> String {
-        d.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(d)) : String(d)
+        guard d.isFinite else { return String(d) }
+        if d.truncatingRemainder(dividingBy: 1) == 0, d >= Double(Int.min), d < Double(Int.max) { return String(Int(d)) }
+        return String(d)
     }
 }

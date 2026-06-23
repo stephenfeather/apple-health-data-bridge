@@ -36,8 +36,8 @@ public enum PatientMatch {
     public static func check(data: Data, subject: SubjectEntry) -> PatientMatchResult {
         guard let patient = firstPatient(data) else { return .noPatient }
         guard let (name, dob) = nameAndDOB(patient), !name.isEmpty, !dob.isEmpty else { return .incomplete }
-        let docTokens = name.lowercased().split(separator: " ").map(String.init)
-        let subjTokens = subject.name.lowercased().split(separator: " ").map(String.init)
+        let docTokens = name.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let subjTokens = subject.name.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
         guard let df = docTokens.first, let dl = docTokens.last,
               let sf = subjTokens.first, let sl = subjTokens.last else { return .mismatch }
         return (df == sf && dl == sl && dob == subject.dob) ? .match : .mismatch
@@ -45,6 +45,15 @@ public enum PatientMatch {
     public static func extracted(data: Data) -> (name: String, dob: String)? {
         guard let p = firstPatient(data), let (n, d) = nameAndDOB(p) else { return nil }
         return (n, d)
+    }
+    /// Number of Patient resources in the document. `check` only verifies the first, but the
+    /// parser imports every Observation, so a multi-patient bundle must be refused upstream.
+    public static func patientCount(data: Data) -> Int {
+        let dec = JSONDecoder()
+        if let bundle = try? dec.decode(ModelsR4.Bundle.self, from: data) {
+            return bundle.entry?.compactMap { $0.resource?.get(if: ModelsR4.Patient.self) }.count ?? 0
+        }
+        return (try? dec.decode(ModelsR4.Patient.self, from: data)) != nil ? 1 : 0
     }
     private static func firstPatient(_ data: Data) -> ModelsR4.Patient? {
         let dec = JSONDecoder()
@@ -95,6 +104,12 @@ struct Parse: ParsableCommand {
         let inputURL = URL(fileURLWithPath: input)
         let data = try Data(contentsOf: inputURL)
 
+        // Subject binding only verifies the first Patient; refuse mixed-patient bundles to avoid
+        // importing another person's observations under the selected subject.
+        if PatientMatch.patientCount(data: data) > 1 {
+            throw Fail("multiple patients in bundle — refusing")
+        }
+
         switch PatientMatch.check(data: data, subject: entry) {
         case .match, .noPatient: break
         case .mismatch:
@@ -110,13 +125,13 @@ struct Parse: ParsableCommand {
         let doc = result.document
 
         let issues = BridgeKit.validate(doc)   // disambiguate from Parse.validate() (ParsableCommand)
-        for i in issues { FileHandle.standardError.write(Data("[\(i.severity)] \(i.message)\n".utf8)) }
+        for i in issues { try? FileHandle.standardError.write(contentsOf: Data("[\(i.severity)] \(i.message)\n".utf8)) }
         if issues.contains(where: { $0.severity == .error }) { throw Fail("validation failed") }
 
         let dir = settings.dataRoot.appendingPathComponent("subjects/\(entry.subjectId)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let out = dir.appendingPathComponent("\(doc.source.sha256).bridge.json")
-        try BridgeJSON.encoder.encode(doc).write(to: out)
+        try BridgeJSON.encoder.encode(doc).write(to: out, options: .atomic)
 
         if settings.logLevel != .quiet {
             let mapped = doc.observations.filter { $0.mapping != nil }.count
@@ -129,7 +144,7 @@ struct Parse: ParsableCommand {
         if doc.observations.isEmpty { throw ExitCode(2) }   // wrote an empty document
     }
 
-    private func log(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
+    private func log(_ s: String) { try? FileHandle.standardError.write(contentsOf: Data((s + "\n").utf8)) }
     private func mismatchDetail(_ data: Data, _ entry: SubjectEntry) -> String {
         let ext = PatientMatch.extracted(data: data)
         return "  document: \(ext?.name ?? "?") / \(ext?.dob ?? "?")\n  roster:   \(entry.name) / \(entry.dob)"

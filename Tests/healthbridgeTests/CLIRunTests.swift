@@ -56,4 +56,9 @@ final class CLIRunTests: XCTestCase {
                          "--verbose", "--quiet"])
         XCTAssertNotEqual(r.status, 0)
     }
+    func testMultiPatientBundleRefuses() throws {
+        // A bundle with >1 distinct Patient could leak another person's observations under the selected subject.
+        let r = try run(["parse", try fixturePath("bundle-two-patients"), "--config", try tmpConfig(), "--subject", "jane"])
+        XCTAssertNotEqual(r.status, 0)
+    }
 }

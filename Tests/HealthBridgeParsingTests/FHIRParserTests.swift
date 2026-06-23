@@ -56,4 +56,9 @@ final class FHIRParserTests: XCTestCase {
         XCTAssertEqual(r.skipped.first?.reason, .noCode); XCTAssertEqual(r.skipped.first?.label, "Free text only")
     }
     func testMalformedThrows() { XCTAssertThrowsError(try FHIRParser().parse(Data("{ not".utf8), subjectId: "s")) }
+    func testHugeValueDoesNotCrash() throws {
+        // 1e20 is integral but overflows Int — stableNumberString must not trap.
+        let o = try XCTUnwrap(parse("observation-hugevalue").observations.first)
+        XCTAssertEqual(o.value, .quantity(1e20))
+    }
 }
