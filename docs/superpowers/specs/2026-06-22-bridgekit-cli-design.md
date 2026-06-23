@@ -79,7 +79,7 @@ Pure logic; imports only `Foundation` + `CryptoKit` (no `ModelsR4`, no HealthKit
 **Contents**
 - The schema types (§2) with `Codable` and deterministic JSON (`BridgeJSON.encoder`/`decoder`).
 - **LOINC→HealthKit mapping table** as data — seeded **lean (~10 entries)**: weight, height, BMI, body temperature, heart rate, respiratory rate, O₂ saturation, BP systolic, BP diastolic, blood glucose. Grown from evidence (the CLI reports unmapped observations by name). `MappingTable.resolve(loinc:value:unit:) -> HealthKitMapping?` returns `nil` for unknown LOINC, non-quantity values, or unconvertible units — conservatively leaving a value out rather than writing a wrong-unit number.
-- `ObservationID.derive(documentKey:system:code:effectiveDate:rawValue:unit:) -> String` — SHA-256 hex; `documentKey` is the source file's sha256 → **per-file idempotency** (§6).
+- `ObservationID.derive(subjectId:system:code:effectiveDate:rawValue:unit:) -> String` — SHA-256 hex over **content + subject** (no source-file key) → the same clinical observation gets the same id across files, so it dedupes once written (§6).
 - `SubjectHash.make(name:dob:) -> String` — SHA-256 of canonicalized `name|dob`; used to stamp and cross-check subject identity.
 - `validate(_:) -> [ValidationIssue]` — structural/semantic checks (§7).
 
@@ -123,8 +123,8 @@ healthbridge subject list
 
 The core risk is one subject's data reaching another's device. Two gates:
 
-- **At processing (M1, Mac):** `parse` requires a selected subject and **cross-checks** it against the document's FHIR `Patient` (name/dob → `SubjectHash`). On mismatch it **refuses**. A bundle with no `Patient` cannot contradict, so it passes (the operator's `--subject` choice stands).
-- **At write (later, iOS):** the device is configured once with its owner's `subjectId`; the writer **refuses any Bridge Document whose `subjectId` ≠ the device owner**, and the mandatory review screen shows the document's name/dob for human confirmation.
+- **At processing (M1, Mac):** `parse` requires a selected subject and cross-checks it against the document's FHIR `Patient`. `PatientMatch` returns a four-state result — `match` / `mismatch` / `noPatient` / `incomplete` (Patient present but missing a usable name/dob). Name comparison is **token-based** (case-insensitive first+last name + dob), not a brittle full-string hash, so "Caleb John Feather" vs "Caleb Feather" still matches. Policy: `match` and `noPatient` proceed; `mismatch` refuses unless `--force`; `incomplete` refuses unless `--allow-unverified-subject`. On refusal the CLI prints the document's extracted name/dob alongside the roster's, so the operator sees exactly what failed. Handles both `Bundle`-wrapped and bare `Patient` resources.
+- **At write (later, iOS):** the device is configured once with its owner's `subject.id`; the writer **refuses any Bridge Document whose `subject.id` ≠ the device owner**, and the mandatory review screen shows the document's name/dob for human confirmation.
 
 ### 4.4 Storage layout
 
@@ -154,13 +154,13 @@ healthbridge subject list [--config <p>]
 5. Resolve each observation's `mapping` via `MappingTable`; **dedupe by id** (keep first).
 6. Assemble the `BridgeDocument` with the subject's `SubjectRef`; `validate`; abort on any error.
 7. Write to `<data_root>/subjects/<subjectId>/<sha>.bridge.json`.
-8. Summary to stderr: N observations, M mapped, K unmapped, S skipped — and **log each skipped observation** (reason + label). `--quiet` suppresses; `--verbose` is the default-plus.
+8. Summary to stderr: N observations, M mapped, K unmapped, S skipped — and **log each skipped observation** (reason + label) **and each unmapped-but-written observation** (LOINC code + name), the latter being the evidence loop for growing the mapping table. `--quiet` suppresses; `--verbose` is the default-plus. A zero-observation document is still written but the CLI exits with a **distinct non-zero code** so automation can detect it.
 
 **Parser abstraction**
 ```swift
 protocol DocumentParser {
     static func canParse(_ data: Data) -> Bool
-    func parse(_ data: Data, documentKey: String) throws -> ParseResult
+    func parse(_ data: Data, subjectId: String) throws -> ParseResult
 }
 struct ParseResult { let observations: [Observation]; let skipped: [Skip] }
 struct Skip { enum Reason { case noCode, noDate, unrepresentableValue }; let reason: Reason; let label: String }
@@ -170,16 +170,18 @@ M1 ships `FHIRParser`. C-CDA (M2) and PDF (M3) conform to the same protocol. A m
 **FHIR parser (M1)** — FHIR **R4, JSON**, via Apple's **`FHIRModels` (`ModelsR4`)**:
 - Decode a `Bundle` (or bare `Observation`); select `Observation` resources.
 - Per observation: LOINC `code`, `valueQuantity` (UCUM value+unit) or `valueString`, `effectiveDateTime`/`effectivePeriod`/`instant`, category.
-- **Drop-and-log**: observations with no coding (`.noCode`) or no effective date (`.noDate`) are dropped and recorded in `skipped` for the CLI to log — never silently lost. (Date is required because the schema's `effectiveDate` is non-optional.)
+- **Component panels:** an observation with a `component` array and no top-level value (e.g. blood pressure, LOINC `85354-9` with `8480-6` systolic + `8462-4` diastolic components) yields **one Observation per component** — otherwise standard BP would be dropped and never map.
+- **UTC date normalization:** offset-less / date-only FHIR dates are resolved under a **fixed UTC calendar** (date-only anchored to UTC midnight), not `TimeZone.current`. Without this, the same file on machines in different timezones would derive different `Date`s → different `Observation.id` → broken determinism.
+- **Drop-and-log**: observations with no coding (`.noCode`), no effective date (`.noDate`), or no representable value (`.unrepresentableValue`) are dropped and recorded in `skipped` for the CLI to log — never silently lost.
 - Prefer `valueQuantity.code` (UCUM, e.g. `[lb_av]`) over `.unit` (display) so mapping matches reliably.
 
 ---
 
 ## 6. Idempotency / stable IDs
 
-`ObservationID.derive` hashes `documentKey(source sha256) + code.system + code.code + effectiveDate + raw value + unit`. With `documentKey = source file sha256`, idempotency is **per-file**: re-importing the same document never duplicates samples. The same observation in two *different* files gets different ids by design — **cross-file dedup is a later milestone**.
+`ObservationID.derive` hashes **`subjectId + code.system + code.code + effectiveDate + raw value + unit`** — content + subject, *not* the source file. So the same clinical observation produces the **same id across different files** (an early portal export and a final summary), which means HealthKit dedupes it via the sync identifier instead of writing duplicates. The id is also **stable forever** — it never depends on which file delivered the observation, so there is no future migration that would invalidate already-written `HKMetadataKeySyncIdentifier`s. `subjectId` is in the hash so two people's identical readings never collide.
 
-The CLI dedupes identical observations *within* a file (same id → keep first), so a report that restates a value imports once. The iOS writer (later) writes each HKObject with `HKMetadataKeySyncIdentifier = Observation.id`, so re-writes update in place.
+The CLI also dedupes identical observations *within* a file (same id → keep first). The iOS writer (later) writes each HKObject with `HKMetadataKeySyncIdentifier = Observation.id`, so re-writes — within or across files — update in place rather than duplicating.
 
 ---
 
@@ -188,12 +190,13 @@ The CLI dedupes identical observations *within* a file (same id → keep first),
 `validate(_:) -> [ValidationIssue]` (severities `error`/`warning`). The CLI prints all issues and **aborts on any `error`**.
 
 - wrong `schemaVersion` → error
-- empty `source.sha256` → error
-- empty `subject.id` → error
+- `source.sha256` empty or not 64 hex chars → error
+- `subject.id` empty or not a valid UUID → error; empty `subject.hash` → error
 - duplicate observation ids → error (**backstop** — the CLI dedupes before validating, so this should not fire; a survivor signals a bug)
-- `confidence` outside `0...1` → error
-- `mapping != nil` on a `.string` value → error (internal invariant)
-- zero observations → warning
+- empty observation `id` or `name` → error
+- `confidence` outside `0...1`, or non-finite quantity value, or non-finite `mapping.convertedValue` → error
+- `mapping != nil` on a `.string` value, or a `mapping` with any empty field → error (internal invariant)
+- zero observations → warning (document still written; CLI exits with a distinct code)
 
 ---
 
@@ -212,19 +215,22 @@ No network in tests. All fixtures are synthetic/public — **no PHI** in the rep
 
 1. **FHIR version — R4.** Production-EHR standard; supported by `FHIRModels` (ModelsR4). Verified resolved version **0.9.3**.
 2. **FHIR serialization — JSON** via `FHIRModels`. No `XMLParser` on the FHIR path (C-CDA, M2, is XML-only and gets its own).
-3. **Dependencies** — `FHIRModels`, `swift-argument-parser` (1.8.2), `TOMLKit`. `BridgeKit` stays dependency-free beyond Foundation/CryptoKit.
+3. **Dependencies** — `FHIRModels` (0.9.3), `swift-argument-parser` (`.upToNextMinor(from: "1.8.2")`), `TOMLKit` (behind a one-file `TOMLCodec` adapter to isolate API uncertainty). `BridgeKit` stays dependency-free beyond Foundation/CryptoKit. **`Package.resolved` is committed** for reproducible pins.
 4. **C-CDA — M2** (sibling `DocumentParser`, no schema change). **PDF/LLM — M3.**
-5. **Subject identity — UUID `subjectId` + `sha256(name|dob)` cross-check.** Not a name hash as the primary id.
-6. **Config — TOML**, default `~/.config/apple-health-data-bridge/config.toml`, `--config` overridable; **every scalar setting has a `--flag`** (precedence flag > config > default); roster is **CLI-managed**.
-7. **Storage — `~/Documents/apple-health-data-bridge` default** (`~`-tree, backed up), user-definable via `data_root`; per-subject subdirs keyed by `subjectId`.
-8. **Code-less / date-less observations — drop and log** (recorded in `ParseResult.skipped`, surfaced by the CLI).
+5. **Subject identity — UUID `subject.id` + `sha256(name|dob)` cross-check.** Not a name hash as the primary id.
+6. **Config — TOML**, default `~/.config/apple-health-data-bridge/config.toml`, `--config` overridable; **every scalar setting has a `--flag`** (precedence flag > config > default); roster is **CLI-managed** (`subject add` rejects duplicate keys; explicit `--key` available).
+7. **Storage — `~/Documents/apple-health-data-bridge` default** (`~`-tree, backed up), user-definable via `data_root`; per-subject subdirs keyed by `subject.id`.
+8. **Code-less / date-less / unrepresentable observations — drop and log** (recorded in `ParseResult.skipped`, surfaced by the CLI).
 9. **Within-file duplicates — dedupe-and-proceed** (keep first); validator duplicate-id error is a backstop.
+10. **Observation id — content + subject based** (`subjectId + code + date + value + unit`), *not* file-keyed. Stable forever; dedupes the same observation across files via the HealthKit sync identifier. (Reverses the earlier "per-file only" choice — the id is the durable sync key, so it must not depend on the delivering file.)
+11. **Patient cross-check — four-state** (`match`/`mismatch`/`noPatient`/`incomplete`) with token-based name matching; `mismatch` needs `--force`, `incomplete` needs `--allow-unverified-subject`.
+12. **Deterministic extraction — `extractedAt` is an injected clock** (`now:` param, fixed in tests); UTC date normalization for offset-less FHIR dates. Both protect byte-stable output.
 
 ---
 
 ## 10. Out of scope (this spec)
 
 - iOS writer app, HealthKit writes, the review UI, the device-to-subject binding gate, local SwiftData store (separate spec — the `subjectId` contract here enables it).
-- Cross-file / longitudinal dedup across many exports (the per-file id contract enables it; the merge logic is later).
+- Longitudinal *reconciliation* across exports — conflicting/corrected values, supersedence, history merging. (Plain cross-file dedup of *identical* observations now happens for free via the content-based id; reconciling *different* values for the same code/time is later.)
 - C-CDA (M2) and PDF + LLM extraction (M3).
 - Mac→iOS file transport (AirDrop/iCloud/Files).
