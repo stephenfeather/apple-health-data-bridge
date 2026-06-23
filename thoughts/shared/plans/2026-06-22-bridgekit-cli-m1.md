@@ -86,7 +86,9 @@ let package = Package(
         .executable(name: "healthbridge", targets: ["healthbridge"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/FHIRModels.git", from: "0.5.0"),
+        // Verified resolved versions: FHIRModels 0.9.3, swift-argument-parser 1.8.2.
+        // FHIRModels is pre-1.0 (minor bumps may break) — pin to the 0.9.x line.
+        .package(url: "https://github.com/apple/FHIRModels.git", .upToNextMinor(from: "0.9.3")),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
     ],
     targets: [
@@ -107,30 +109,34 @@ let package = Package(
             ]
         ),
         .testTarget(name: "BridgeKitTests", dependencies: ["BridgeKit"]),
-        .testTarget(
-            name: "HealthBridgeParsingTests",
-            dependencies: ["HealthBridgeParsing", "BridgeKit"],
-            resources: [.copy("Fixtures")]
-        ),
-        .testTarget(
-            name: "healthbridgeTests",
-            dependencies: ["healthbridge"],
-            resources: [.copy("Fixtures")]
-        ),
+        // HealthBridgeParsingTests is added in Task 6; healthbridgeTests in Task 8.
+        // A test target with no .swift sources fails to build, so each test target is
+        // declared in the task that creates its first test file — NOT up front here.
     ]
 )
 ```
 
-> Note: `HealthBridgeParsing` and `healthbridge` targets are declared now but their source/test files arrive in later tasks. Create empty `Sources/HealthBridgeParsing/` and `Sources/healthbridge/` directories with a one-line placeholder so the package resolves. Add placeholders:
-> - `Sources/HealthBridgeParsing/Placeholder.swift` → `// placeholder, replaced in Task 6`
-> - `Sources/healthbridge/Placeholder.swift` → `// placeholder, replaced in Task 8`
-> - `Tests/HealthBridgeParsingTests/Fixtures/.gitkeep` and `Tests/healthbridgeTests/Fixtures/.gitkeep` (empty) so `.copy("Fixtures")` resolves.
+> **Note (verified by building this exact manifest):** the package resolves/builds/tests/runs clean with these four targets. Each non-test target needs at least one compilable source so resolution succeeds:
+> - `Sources/BridgeKit/BridgeKit.swift` → `// BridgeKit — Bridge Document schema, mapping, and validation.` (library; comment-only is fine).
+> - `Sources/HealthBridgeParsing/Placeholder.swift` → `// placeholder, replaced in Task 6` (library; comment-only is fine).
+> - `Sources/healthbridge/main.swift` → `// placeholder entry point, replaced in Task 8`. **MUST be named `main.swift`.** An `.executableTarget` requires an entry point; SwiftPM treats `main.swift` as one even when it holds only a comment (verified: builds and `swift run healthbridge` exits 0). A comment-only `Placeholder.swift` here would fail `swift build` with a missing-entry-point error.
+> - No `Fixtures`/`.gitkeep` directories yet — the test targets that use them don't exist until Tasks 6/8.
 
-- [ ] **Step 2: Create placeholder source**
+- [ ] **Step 2: Create the three stub sources**
 
 `Sources/BridgeKit/BridgeKit.swift`:
 ```swift
 // BridgeKit — Bridge Document schema, mapping, and validation.
+```
+
+`Sources/HealthBridgeParsing/Placeholder.swift`:
+```swift
+// placeholder, replaced in Task 6
+```
+
+`Sources/healthbridge/main.swift` (note the filename — it is the executable entry point):
+```swift
+// placeholder entry point, replaced in Task 8
 ```
 
 - [ ] **Step 3: Write the smoke test**
@@ -150,7 +156,7 @@ final class SmokeTests: XCTestCase {
 - [ ] **Step 4: Resolve and build**
 
 Run: `swift package resolve && swift build`
-Expected: resolves `FHIRModels` and `swift-argument-parser`, builds with no errors. If `from: "0.5.0"` fails to resolve, run `swift package resolve` after changing to the latest tag shown by the resolver error, and record the pinned version in `Package.resolved`.
+Expected: resolves **FHIRModels 0.9.3** and **swift-argument-parser 1.8.2** (verified), builds with no errors. `Package.resolved` pins both. The first build compiles FHIRModels from source and takes a few minutes; subsequent builds are cached.
 
 - [ ] **Step 5: Run the smoke test**
 
@@ -822,6 +828,7 @@ git commit -m "feat(bridgekit): Bridge Document validation rules"
 ## Task 6: DocumentParser protocol
 
 **Files:**
+- Modify: `Package.swift` (add the `HealthBridgeParsingTests` target — it does not exist yet)
 - Create: `Sources/HealthBridgeParsing/DocumentParser.swift`
 - Delete: `Sources/HealthBridgeParsing/Placeholder.swift`
 - Test: `Tests/HealthBridgeParsingTests/DocumentParserTests.swift`
@@ -833,9 +840,14 @@ git commit -m "feat(bridgekit): Bridge Document validation rules"
   - `enum ParseError: Error, Equatable { case unrecognizedFormat; case malformed(String) }`.
   - `documentKey` is the source `sha256`, threaded in so `ObservationID.derive` produces stable ids.
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Declare the test target, then write the failing test**
 
-`Tests/HealthBridgeParsingTests/DocumentParserTests.swift`:
+First add this test target to `Package.swift`'s `targets:` array (no `resources:` yet — fixtures arrive in Task 7):
+```swift
+        .testTarget(name: "HealthBridgeParsingTests", dependencies: ["HealthBridgeParsing", "BridgeKit"]),
+```
+
+Then create `Tests/HealthBridgeParsingTests/DocumentParserTests.swift`:
 ```swift
 import XCTest
 import BridgeKit
@@ -896,7 +908,7 @@ Expected: both PASS.
 - [ ] **Step 5: Commit**
 
 ```
-git add Sources/HealthBridgeParsing/DocumentParser.swift Tests/HealthBridgeParsingTests/DocumentParserTests.swift
+git add Package.swift Sources/HealthBridgeParsing/DocumentParser.swift Tests/HealthBridgeParsingTests/DocumentParserTests.swift
 git rm Sources/HealthBridgeParsing/Placeholder.swift
 git commit -m "feat(parsing): DocumentParser protocol and ParseError"
 ```
@@ -906,6 +918,7 @@ git commit -m "feat(parsing): DocumentParser protocol and ParseError"
 ## Task 7: FHIR R4 parser
 
 **Files:**
+- Modify: `Package.swift` (add `resources: [.copy("Fixtures")]` to the `HealthBridgeParsingTests` target so `Bundle.module` is generated)
 - Create: `Sources/HealthBridgeParsing/FHIRParser.swift`
 - Create: `Tests/HealthBridgeParsingTests/Fixtures/observation-bodyweight.json`
 - Create: `Tests/HealthBridgeParsingTests/Fixtures/bundle-vitals-and-labs.json`
@@ -915,9 +928,18 @@ git commit -m "feat(parsing): DocumentParser protocol and ParseError"
 - Consumes: `DocumentParser`, `ParseError` (Task 6); `Observation`, `CodeableRef`, `ObservationValue`, `ObservationCategory`, `ObservationID`, `MappingTable` (BridgeKit); `ModelsR4`.
 - Produces: `struct FHIRParser: DocumentParser`. Accepts either a single `Observation` resource or a `Bundle` of them. Each parsed observation has `confidence = 1.0`, raw `code`/`value`/`unit`/`effectiveDate`/`category` populated, and `mapping` left `nil` (the CLI resolves mapping in Task 8 — keeps the parser's single responsibility "FHIR → raw observations").
 
-- [ ] **Step 1: Create the test fixtures**
+- [ ] **Step 1: Wire fixtures into the manifest, then create them**
 
-`Tests/HealthBridgeParsingTests/Fixtures/observation-bodyweight.json`:
+First update the `HealthBridgeParsingTests` target in `Package.swift` to copy the fixtures (required for `Bundle.module`):
+```swift
+        .testTarget(
+            name: "HealthBridgeParsingTests",
+            dependencies: ["HealthBridgeParsing", "BridgeKit"],
+            resources: [.copy("Fixtures")]
+        ),
+```
+
+Then create `Tests/HealthBridgeParsingTests/Fixtures/observation-bodyweight.json`:
 ```json
 {
   "resourceType": "Observation",
@@ -1104,9 +1126,14 @@ public struct FHIRParser: DocumentParser {
             ?? codings.first
     }
 
+    // `value` is the optional enum `Observation.ValueX?`. Unwrap once, then switch the
+    // non-optional (clearer than `case .quantity(let q)?`). `ValueX` has many cases
+    // (.quantity, .string, .dateTime, ...) — `default` covers everything we don't represent.
     private func observationValue(_ value: Observation.ValueX?) -> (ObservationValue, String?, String)? {
+        guard let value else { return nil }
         switch value {
         case .quantity(let q):
+            // FHIRDecimal -> Decimal -> Double. Decimal has NO `.doubleValue`; wrap in NSDecimalNumber.
             guard let decimal = q.value?.value?.decimal else { return nil }
             let d = NSDecimalNumber(decimal: decimal).doubleValue
             let unit = q.code?.value?.string ?? q.unit?.value?.string
@@ -1119,7 +1146,11 @@ public struct FHIRParser: DocumentParser {
         }
     }
 
+    // `effective` is `Observation.EffectiveX?`. Unwrap once, then switch. EffectiveX also has
+    // a `.timing(Timing)` case, so `default` is required. `asNSDate()` throws and is called on
+    // the unwrapped DateTime/Instant struct (the primitive's `.value`).
     private func effectiveDate(_ effective: Observation.EffectiveX?) -> Date? {
+        guard let effective else { return nil }
         switch effective {
         case .dateTime(let dt):
             return try? dt.value?.asNSDate()
@@ -1149,19 +1180,22 @@ public struct FHIRParser: DocumentParser {
 }
 ```
 
-> Implementation notes for the executor:
-> - `Observation.ValueX` and `Observation.EffectiveX` are the `ModelsR4` `value[x]` / `effective[x]` enums. If the exact case names differ in the resolved `FHIRModels` version (e.g. `.dateTime` vs `.fhirDateTime`), let the failing test guide the fix — the cases are discoverable via Xcode autocomplete or `swift build` diagnostics.
-> - `asNSDate()` is `FHIRModels`' documented `DateTime`/`Instant`/`DateOnly` → `Foundation.Date` conversion. If it is spelled differently in the pinned version, adjust `effectiveDate(_:)` accordingly; the `testParsesSingleObservation` epoch assertion verifies correctness.
+> Implementation notes (verified against FHIRModels 0.9.3 by building a probe — these are facts, not guesses):
+> - `Observation.code` is **non-optional** `CodeableConcept` (so `loincCoding(o.code)` passes it directly; no `?`). `Observation.value` is `Observation.ValueX?` and `Observation.effective` is `Observation.EffectiveX?` (both optional — unwrapped once with `guard let` before switching the non-optional).
+> - Case labels are exactly `.quantity`, `.string`, `.dateTime`, `.instant`, `.period`. `ValueX` and `EffectiveX` each have additional cases (e.g. `EffectiveX.timing`), so the `default` branches are required for exhaustiveness.
+> - Quantity number path: `q.value` is `FHIRPrimitive<FHIRDecimal>?` → `q.value?.value?.decimal` is `Decimal` → `NSDecimalNumber(decimal:).doubleValue`. `Decimal` itself has no `.doubleValue`.
+> - `Coding` unwrap chains: `coding.system?.value?.url.absoluteString`, `coding.code?.value?.string`, `coding.display?.value?.string`.
+> - `asNSDate()` exists, is `throws`, and is called on the unwrapped `DateTime`/`Instant` struct (the primitive's `.value`), e.g. `dt.value?.asNSDate()` — NOT on the `FHIRPrimitive` itself.
 
 - [ ] **Step 5: Run to verify pass**
 
 Run: `swift test --filter FHIRParserTests`
-Expected: all five PASS. If a `ModelsR4` enum case name or `asNSDate()` spelling differs, fix per the implementation notes and re-run until green.
+Expected: all five PASS.
 
 - [ ] **Step 6: Commit**
 
 ```
-git add Sources/HealthBridgeParsing/FHIRParser.swift Tests/HealthBridgeParsingTests
+git add Package.swift Sources/HealthBridgeParsing/FHIRParser.swift Tests/HealthBridgeParsingTests
 git commit -m "feat(parsing): FHIR R4 JSON parser for Observation and Bundle resources"
 ```
 
@@ -1170,8 +1204,9 @@ git commit -m "feat(parsing): FHIR R4 JSON parser for Observation and Bundle res
 ## Task 8: healthbridge CLI
 
 **Files:**
+- Modify: `Package.swift` (add the `healthbridgeTests` target with `resources: [.copy("Fixtures")]`)
 - Create: `Sources/healthbridge/HealthBridge.swift`
-- Delete: `Sources/healthbridge/Placeholder.swift`
+- Delete: `Sources/healthbridge/main.swift` (the Task 1 entry-point stub — replaced by `HealthBridge.swift`'s `@main`)
 - Create: `Tests/healthbridgeTests/Fixtures/bundle-vitals-and-labs.json` (copy of the Task 7 fixture)
 - Test: `Tests/healthbridgeTests/CLIIntegrationTests.swift`
 
@@ -1179,9 +1214,20 @@ git commit -m "feat(parsing): FHIR R4 JSON parser for Observation and Bundle res
 - Consumes: `FHIRParser`, `DocumentParser`, `ParseError` (HealthBridgeParsing); `BridgeDocument`, `Source`, `SourceKind`, `Extractor`, `Observation`, `MappingTable`, `BridgeJSON`, `validate`, `ObservationValue` (BridgeKit); `ArgumentParser`; `CryptoKit`.
 - Produces: a `healthbridge parse <input> [--out <path>] [--format auto|fhir]` command. Behaviour: read file → compute `sha256` → select parser → `[Observation]` → resolve each observation's `mapping` via `MappingTable` → assemble `BridgeDocument(schemaVersion: 1, …, extractor: Extractor("fhir-parser", "0.1.0"))` → `validate` (abort on any `.error`) → write deterministic JSON to `--out` (default: `<input-basename>.bridge.json`) → print a summary (`N observations, M mapped, K unmapped`) to stderr. Exposes a testable `BridgeBuilder.build(data:fileName:) throws -> BridgeDocument` so the integration test does not shell out.
 
-- [ ] **Step 1: Copy the fixture for the CLI test**
+- [ ] **Step 1: Declare the CLI test target and copy the fixture**
 
+Add the `healthbridgeTests` target to `Package.swift`'s `targets:` array:
+```swift
+        .testTarget(
+            name: "healthbridgeTests",
+            dependencies: ["healthbridge"],
+            resources: [.copy("Fixtures")]
+        ),
 ```
+
+Then copy the Task 7 fixture so the CLI test has its own resource:
+```
+mkdir -p Tests/healthbridgeTests/Fixtures
 cp Tests/HealthBridgeParsingTests/Fixtures/bundle-vitals-and-labs.json Tests/healthbridgeTests/Fixtures/bundle-vitals-and-labs.json
 ```
 
@@ -1346,8 +1392,8 @@ Expected: every test in `BridgeKitTests`, `HealthBridgeParsingTests`, and `healt
 - [ ] **Step 8: Commit**
 
 ```
-git add Sources/healthbridge/HealthBridge.swift Tests/healthbridgeTests
-git rm Sources/healthbridge/Placeholder.swift
+git add Package.swift Sources/healthbridge/HealthBridge.swift Tests/healthbridgeTests
+git rm Sources/healthbridge/main.swift
 git commit -m "feat(cli): healthbridge parse command producing validated Bridge Documents"
 ```
 
