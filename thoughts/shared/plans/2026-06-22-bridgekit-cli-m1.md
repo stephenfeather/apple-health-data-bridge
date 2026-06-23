@@ -442,7 +442,7 @@ github-agent-commit "feat(bridgekit): Bridge Document schema with deterministic 
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `enum ObservationID { static func derive(documentKey: String, system: String?, code: String?, effectiveDate: Date, rawValue: String, unit: String?) -> String }` — returns a lowercase hex SHA-256 string. `documentKey` is the source `sha256` (or a stable patient+doc key). `rawValue` is the observation value rendered as a stable string (e.g. `"72.5"` or the qualitative string).
+- Produces: `enum ObservationID { static func derive(documentKey: String, system: String?, code: String?, effectiveDate: Date, rawValue: String, unit: String?) -> String }` — returns a lowercase hex SHA-256 string. **`documentKey` is the source file's `sha256`** — idempotency is scoped *per-file* (re-importing the same document never duplicates HealthKit samples). The same observation in two *different* files gets different ids by design; cross-file dedup is a later milestone (spec §8). `rawValue` is the observation value rendered as a stable string (e.g. `"72.5"` or the qualitative string).
 
 - [ ] **Step 1: Write failing test**
 
