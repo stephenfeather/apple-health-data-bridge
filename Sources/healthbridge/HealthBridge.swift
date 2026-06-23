@@ -11,9 +11,7 @@ public struct BuildResult { public let document: BridgeDocument; public let skip
 public enum BridgeBuilder {
     public static func build(data: Data, fileName: String, subject: SubjectRef, now: Date = Date()) throws -> BuildResult {
         let sha = sha256Hex(data)
-        guard let kind = ParserRegistry.sourceKind(for: data), let parser = ParserRegistry.parser(for: data) else {
-            throw ParseError.unrecognizedFormat
-        }
+        guard let (parser, kind) = ParserRegistry.detect(data) else { throw ParseError.unrecognizedFormat }
         let result = try parser.parse(data, subjectId: subject.id)
         let resolved = result.observations.map { o -> BridgeKit.Observation in
             var o = o

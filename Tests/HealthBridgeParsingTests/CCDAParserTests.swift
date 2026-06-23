@@ -127,5 +127,16 @@ final class CCDAParserTests: XCTestCase {
         XCTAssertEqual(Set(r.observations.compactMap { $0.code?.code }), ["29463-7", "1742-6"])
         XCTAssertEqual(r.observations.first { $0.code?.code == "1742-6" }?.category, .lab)
     }
+    // Regression (PR #2 review #1): a section containing a nested <section> must not double-count.
+    // The top-level section's own descendant observation walk already collects subsection observations
+    // exactly once; iterating the nested section separately would duplicate observations AND skips.
+    func testNestedSubsectionDoesNotDuplicate() throws {
+        let r = try parse("ccda-nested-section")
+        let codes = r.observations.compactMap { $0.code?.code }
+        XCTAssertEqual(codes.filter { $0 == "8867-4" }.count, 1, "nested heart rate must appear exactly once")
+        XCTAssertEqual(codes.filter { $0 == "29463-7" }.count, 1)
+        XCTAssertEqual(r.observations.count, 2)              // weight + heart rate, no dup
+        XCTAssertEqual(r.skipped.count, 1)                   // the nested no-date resp rate, not double-counted
+    }
 }
 #endif

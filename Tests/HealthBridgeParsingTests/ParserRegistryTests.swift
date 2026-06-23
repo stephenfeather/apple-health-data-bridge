@@ -16,6 +16,14 @@ final class ParserRegistryTests: XCTestCase {
         XCTAssertNil(ParserRegistry.parser(for: Data("plain text".utf8)))
         XCTAssertNil(ParserRegistry.sourceKind(for: Data("plain text".utf8)))
     }
+    func testDetectReturnsParserAndKindTogether() throws {
+        let res = try XCTUnwrap(ParserRegistry.detect(try fixture("observation-bodyweight", "json")))
+        XCTAssertEqual(res.kind, .fhir)
+        XCTAssertTrue(FHIRParser.canParse(try fixture("observation-bodyweight", "json")))
+    }
+    func testDetectUnknownReturnsNil() {
+        XCTAssertNil(ParserRegistry.detect(Data("plain text".utf8)))
+    }
     #if canImport(FoundationXML) || os(macOS)
     func testDetectsCCDA() throws {
         XCTAssertEqual(ParserRegistry.sourceKind(for: try fixture("ccda-minimal", "xml")), .ccda)

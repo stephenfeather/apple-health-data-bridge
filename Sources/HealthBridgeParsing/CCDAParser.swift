@@ -20,11 +20,23 @@ public struct CCDAParser: DocumentParser {
 
         var observations: [Observation] = []
         var skipped: [Skip] = []
-        for section in try CDAXML.elements(root, localName: "section") {
+        // Iterate ONLY the top-level structuredBody sections. A descendant-or-self section walk would
+        // also visit nested subsections, and since each section's own descendant observation walk
+        // already collects everything beneath it, that double-counts subsection observations and skips.
+        for section in topLevelSections(root) {
             let (obs, skips) = parseSection(section, subjectId: subjectId)
             observations.append(contentsOf: obs); skipped.append(contentsOf: skips)
         }
         return ParseResult(observations: observations, skipped: skipped)
+    }
+
+    /// The direct structuredBody sections: ClinicalDocument/component/structuredBody/component/section.
+    /// Subsections (a section's own component/section) are intentionally NOT iterated here — the
+    /// owning top-level section's descendant observation walk collects their observations once.
+    private func topLevelSections(_ root: XMLElement) -> [XMLElement] {
+        (try? CDAXML.query(root,
+            "./*[local-name()='component']/*[local-name()='structuredBody']/*[local-name()='component']/*[local-name()='section']"
+        )) ?? []
     }
 
     // MARK: section dispatch (Tasks 3,5,6)
@@ -136,11 +148,11 @@ public struct CCDAParser: DocumentParser {
 
     // MARK: HL7 TS date — UTC for timezone-less/date-only (parity with FHIRDate)
     static func date(fromHL7TS ts: String) -> Date? {
-        let digits = ts.prefix { $0.isNumber }
+        let digits = Array(ts.prefix { $0.isNumber })
         guard digits.count >= 8 else { return nil }
         func part(_ lo: Int, _ len: Int) -> Int? {
-            let s = Array(digits); guard lo + len <= s.count else { return nil }
-            return Int(String(s[lo..<lo+len]))
+            guard lo + len <= digits.count else { return nil }
+            return Int(String(digits[lo..<lo+len]))
         }
         var c = DateComponents()
         c.year = part(0, 4); c.month = part(4, 2); c.day = part(6, 2)

@@ -18,9 +18,14 @@ enum CDAXML {
         return root.localName == "ClinicalDocument"
     }
 
+    /// Run an explicit XPath against `node` and return the element results.
+    static func query(_ node: XMLNode, _ xpath: String) throws -> [XMLElement] {
+        try node.nodes(forXPath: xpath).compactMap { $0 as? XMLElement }
+    }
+
+    /// Descendant-or-self elements by local name (namespace-robust via local-name()).
     static func elements(_ node: XMLNode, localName: String) throws -> [XMLElement] {
-        let nodes = try node.nodes(forXPath: ".//*[local-name()='\(localName)']")
-        return nodes.compactMap { $0 as? XMLElement }
+        try query(node, ".//*[local-name()='\(localName)']")
     }
 
     static func child(_ el: XMLElement, localName: String) -> XMLElement? {
