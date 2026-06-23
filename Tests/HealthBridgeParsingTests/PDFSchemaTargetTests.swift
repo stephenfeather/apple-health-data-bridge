@@ -30,7 +30,8 @@ final class PDFSchemaTargetTests: XCTestCase {
     /// `PDFText` exists (Task 2): replace the `true` with `PDFText.isPDF(Data("%PDF".utf8))`.
     func testPDFPathIsCompiledInOnMacOS() {
         #if os(macOS)
-        XCTAssertTrue(true, "M3 PDF path compiled in on macOS")   // Task 2: -> XCTAssertTrue(PDFText.isPDF(Data("%PDF".utf8)))
+        // Touches the guarded PDF path for real: if PDFText compiled out on macOS this fails to build/run.
+        XCTAssertTrue(PDFText.isPDF(Data("%PDF".utf8)), "M3 PDF path compiled in on macOS")
         #else
         // Not macOS: M3 PDF path is intentionally compiled out. This run did NOT exercise M3 —
         // the macOS green gate (T3) is the authoritative one. Marked, not silently green.
