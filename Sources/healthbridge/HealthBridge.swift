@@ -11,8 +11,8 @@ public struct BuildResult { public let document: BridgeDocument; public let skip
 public enum BridgeBuilder {
     public static func build(data: Data, fileName: String, subject: SubjectRef, now: Date = Date()) throws -> BuildResult {
         let sha = sha256Hex(data)
-        guard FHIRParser.canParse(data) else { throw ParseError.unrecognizedFormat }
-        let result = try FHIRParser().parse(data, subjectId: subject.id)
+        guard let (parser, kind) = ParserRegistry.detect(data) else { throw ParseError.unrecognizedFormat }
+        let result = try parser.parse(data, subjectId: subject.id)
         let resolved = result.observations.map { o -> BridgeKit.Observation in
             var o = o
             o.mapping = MappingTable.resolve(loinc: o.code?.code, value: o.value, unit: o.unit)
@@ -22,8 +22,8 @@ public enum BridgeBuilder {
         let deduped = resolved.filter { seen.insert($0.id).inserted }
         let doc = BridgeDocument(
             schemaVersion: BridgeDocument.currentSchemaVersion,
-            source: Source(kind: .fhir, fileName: fileName, sha256: sha, extractedAt: now,
-                           extractor: Extractor(engine: "fhir-parser", version: "0.1.0")),
+            source: Source(kind: kind, fileName: fileName, sha256: sha, extractedAt: now,
+                           extractor: Extractor(engine: kind == .ccda ? "ccda-parser" : "fhir-parser", version: "0.1.0")),
             subject: subject, observations: deduped)
         return BuildResult(document: doc, skipped: result.skipped)
     }
@@ -34,8 +34,21 @@ public enum PatientMatchResult { case match, mismatch, noPatient, incomplete }
 
 public enum PatientMatch {
     public static func check(data: Data, subject: SubjectEntry) -> PatientMatchResult {
+        #if canImport(FoundationXML) || os(macOS)
+        if CCDAParser.canParse(data) {
+            let pts = CCDAParser.patientDemographics(data)
+            guard let first = pts.first else { return .noPatient }
+            if pts.count > 1 { return .mismatch }   // defensive; the parser also refuses in build()
+            return compare(name: first.name, dob: first.dob, subject: subject)
+        }
+        #endif
         guard let patient = firstPatient(data) else { return .noPatient }
-        guard let (name, dob) = nameAndDOB(patient), !name.isEmpty, !dob.isEmpty else { return .incomplete }
+        guard let (name, dob) = nameAndDOB(patient) else { return .incomplete }
+        return compare(name: name, dob: dob, subject: subject)
+    }
+    /// Shared first+last-token name match plus exact dob — identical for FHIR and C-CDA.
+    private static func compare(name: String, dob: String, subject: SubjectEntry) -> PatientMatchResult {
+        guard !name.isEmpty, !dob.isEmpty else { return .incomplete }
         let docTokens = name.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let subjTokens = subject.name.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
         guard let df = docTokens.first, let dl = docTokens.last,
@@ -43,12 +56,21 @@ public enum PatientMatch {
         return (df == sf && dl == sl && dob == subject.dob) ? .match : .mismatch
     }
     public static func extracted(data: Data) -> (name: String, dob: String)? {
+        #if canImport(FoundationXML) || os(macOS)
+        if CCDAParser.canParse(data) {
+            guard let first = CCDAParser.patientDemographics(data).first, !first.name.isEmpty else { return nil }
+            return (first.name, first.dob)
+        }
+        #endif
         guard let p = firstPatient(data), let (n, d) = nameAndDOB(p) else { return nil }
         return (n, d)
     }
     /// Number of Patient resources in the document. `check` only verifies the first, but the
     /// parser imports every Observation, so a multi-patient bundle must be refused upstream.
     public static func patientCount(data: Data) -> Int {
+        #if canImport(FoundationXML) || os(macOS)
+        if CCDAParser.canParse(data) { return CCDAParser.patientDemographics(data).count }
+        #endif
         let dec = JSONDecoder()
         if let bundle = try? dec.decode(ModelsR4.Bundle.self, from: data) {
             return bundle.entry?.compactMap { $0.resource?.get(if: ModelsR4.Patient.self) }.count ?? 0

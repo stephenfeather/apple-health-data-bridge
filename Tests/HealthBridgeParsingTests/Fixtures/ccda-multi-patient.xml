@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ClinicalDocument xmlns="urn:hl7-org:v3">
+  <recordTarget><patientRole><patient>
+    <name><given>Jane</given><family>Public</family></name><birthTime value="20000101"/>
+  </patient></patientRole></recordTarget>
+  <recordTarget><patientRole><patient>
+    <name><given>John</given><family>Sample</family></name><birthTime value="19800615"/>
+  </patient></patientRole></recordTarget>
+  <component><structuredBody/></component>
+</ClinicalDocument>

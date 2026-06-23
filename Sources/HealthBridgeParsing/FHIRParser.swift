@@ -112,12 +112,6 @@ public struct FHIRParser: DocumentParser {
         if codes.contains("laboratory") { return .lab }
         return .other
     }
-
-    /// Lossless number rendering for id stability (no %g rounding); integral values drop the .0.
-    /// Guards Int conversion so huge/non-finite Doubles (e.g. 1e20) don't trap.
-    private func stableNumberString(_ d: Double) -> String {
-        guard d.isFinite else { return String(d) }
-        if d.truncatingRemainder(dividingBy: 1) == 0, d >= Double(Int.min), d < Double(Int.max) { return String(Int(d)) }
-        return String(d)
-    }
+    // Number rendering for id stability moved to the shared `stableNumberString` free function
+    // (NumberString.swift) so FHIRParser and CCDAParser stay byte-identical for matching content.
 }
