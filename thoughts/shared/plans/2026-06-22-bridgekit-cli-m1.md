@@ -20,7 +20,7 @@
 - **Subject binding:** every Bridge Document carries a required nested `subject` with `subject.id` (UUID), `subject.label`, and `subject.hash` (`sha256` of canonical `name|dob`). The CLI cross-checks the selected subject against the FHIR `Patient` and refuses on mismatch.
 - **Observation id is content-based:** `ObservationID.derive` hashes `subject.id + code.system + code.code + effectiveDate + rawValue + unit` — **no `documentKey`**. The same clinical observation gets the same id across files (it becomes the iOS `HKMetadataKeySyncIdentifier`, which must be stable forever), so cross-file duplicates collapse via the sync id. Within-file dedupe (keep first) still runs in the builder.
 - **No network in tests.** Fixtures are checked-in JSON/TOML. **No PHI** in the repo (synthetic/public data only); processed `*.bridge.json` are gitignored and never committed.
-- **Commit protocol — NEVER run `git commit` or `git push`.** All implementation runs in a **git worktree on a feature branch** (never `main`; created in Task 0). Each "Commit" step: `git add <files>` (and `git rm` for deletions) to stage — the only raw git permitted, because `github-agent-commit` reads `git diff --cached` — then **`github-agent-commit "<message>"`** (signed; refuses `main`; auto-creates the remote branch; resets local to `origin/<branch>` after, so stage everything first). Do NOT run `git commit`/`push`/`fetch`/`reset`/`checkout`/`update-ref`; read-only `git status`/`git diff` is fine. All GitHub API / PRs use **`agent-gh`**, never raw `gh`. The milestone lands as **one PR** to `main` via `agent-gh pr create … --body-file <file>`.
+- **Commit protocol — NEVER run `git commit` or `git push`.** All implementation runs in a **git worktree on a feature branch** (never `main`; created in Task 0). Each "Commit" step: `git add <files>` (and `git rm` for deletions) to stage — the only raw git permitted, because `github-agent-commit` reads `git diff --cached` — then **`github-agent-commit "<message>"`** (signed; refuses `main`; auto-creates the remote branch; resets local to `origin/<branch>` after, so stage everything first). Do NOT run `git commit`/`push`/`fetch`/`reset`/`checkout`/`update-ref`; read-only `git status`/`git diff` is fine. All GitHub API / PRs use **`agent-gh`**, never raw `gh`. The milestone lands as **one PR** to `main` via `agent-gh pr create … --body-file <file>`. **Per-shell env (multi-agent):** the `GITHUB_APP_*` vars load via direnv from the repo-root `.envrc`, which may NOT auto-load inside a worktree subdir or a teammate's fresh shell. Every executor must run the Task 0 Step 2 env check **in the exact shell it will commit from**, before its first `github-agent-commit`; if empty there, `direnv allow` at the worktree path or export the three vars — never fall back to `git commit`.
 - TDD throughout: failing test first, minimal implementation, green, commit.
 
 ---
@@ -87,11 +87,18 @@ git check-ignore -v Package.resolved   # expect: no match (exit 1)
 git check-ignore -v x.bridge.json      # expect: a match
 ```
 
-- [ ] **Step 4: PHI guardrail — no private data tracked**
+- [ ] **Step 4: PHI guardrail — no private data tracked, no real identities in fixtures**
+
+(a) No processed output or private samples tracked:
 ```
 git ls-files | rg -i 'bridge\.json$|samples/private/' && echo "PHI LEAK — STOP" || echo "clean"
 ```
-Expected: `clean` (no matches). If anything prints, STOP — PHI/processed output must never be tracked.
+(b) **No real patient identity in any tracked file.** All fixtures/tests use synthetic identities ONLY (e.g. "Jane Public" / "John Sample", DOB `2000-01-01`). Scan tracked content against a denylist of known real identifiers:
+Scoped to code + fixtures only (`Tests/`, `Sources/`) — patient identity must never appear there. Docs/plans are intentionally excluded (they discuss the denylist itself):
+```
+git ls-files -z 'Tests/**' 'Sources/**' | xargs -0 rg -l -i 'Feather|Caleb|Stephen|2015-04-12|1975-01-01' 2>/dev/null && echo "REAL IDENTITY — STOP" || echo "clean"
+```
+Expected: `clean` for both (at Task 0, `Tests/`/`Sources/` are empty → clean). If either prints, STOP and replace with synthetic data before any commit. **This is the gate the pre-mortem added** — filename checks alone do NOT catch a real name embedded in a committed `.json` fixture, and this is a public repo. Re-run check (b) before every commit that adds/edits fixtures.
 
 - [ ] **Step 5: Toolchain check**
 ```
@@ -209,9 +216,9 @@ import XCTest
 
 final class SettingsTests: XCTestCase {
     private func config() -> Config {
-        Config(dataRoot: "~/from-toml", defaultSubject: "caleb", logLevel: "normal",
-               subjects: [SubjectEntry(key: "caleb", subjectId: "uuid-c", label: "Caleb",
-                                       name: "Caleb Feather", dob: "2015-04-12")])
+        Config(dataRoot: "~/from-toml", defaultSubject: "jane", logLevel: "normal",
+               subjects: [SubjectEntry(key: "jane", subjectId: "uuid-c", label: "Jane",
+                                       name: "Jane Public", dob: "2000-01-01")])
     }
     func testDefaultsWhenNoConfigNoOverrides() {
         let s = SettingsResolver.resolve(config: nil, overrides: Overrides())
@@ -221,7 +228,7 @@ final class SettingsTests: XCTestCase {
     func testConfigOverridesDefault() {
         let s = SettingsResolver.resolve(config: config(), overrides: Overrides())
         XCTAssertTrue(s.dataRoot.path.hasSuffix("from-toml"))
-        XCTAssertEqual(s.selectedSubject?.key, "caleb")
+        XCTAssertEqual(s.selectedSubject?.key, "jane")
     }
     func testFlagOverridesConfig() {
         let s = SettingsResolver.resolve(config: config(),
@@ -233,13 +240,13 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(s.dataRoot.path.contains("~"))
     }
     func testSubjectSelectionByFlag() {
-        let s = SettingsResolver.resolve(config: config(), overrides: Overrides(subject: "caleb"))
+        let s = SettingsResolver.resolve(config: config(), overrides: Overrides(subject: "jane"))
         XCTAssertEqual(s.selectedSubject?.subjectId, "uuid-c")
     }
     func testAddSubjectRejectsDuplicateKey() {
         var c = config()
-        XCTAssertThrowsError(try c.addSubject(SubjectEntry(key: "caleb", subjectId: "x", label: "C", name: "n", dob: "d"))) {
-            XCTAssertEqual($0 as? ConfigError, .duplicateKey("caleb"))
+        XCTAssertThrowsError(try c.addSubject(SubjectEntry(key: "jane", subjectId: "x", label: "C", name: "n", dob: "d"))) {
+            XCTAssertEqual($0 as? ConfigError, .duplicateKey("jane"))
         }
     }
 }
@@ -255,9 +262,9 @@ final class ConfigWriterTests: XCTestCase {
     }
     func testWriteCreatesParentDirsAndRoundTrips() throws {
         let path = tmpPath()
-        var c = Config(dataRoot: "~/Documents/x", defaultSubject: "caleb", logLevel: "verbose")
-        try c.addSubject(SubjectEntry(key: "caleb", subjectId: "uuid-c", label: "Caleb",
-                                      name: "Caleb Feather", dob: "2015-04-12"))
+        var c = Config(dataRoot: "~/Documents/x", defaultSubject: "jane", logLevel: "verbose")
+        try c.addSubject(SubjectEntry(key: "jane", subjectId: "uuid-c", label: "Jane",
+                                      name: "Jane Public", dob: "2000-01-01"))
         try ConfigWriter.write(c, path: path)            // parent dir did not exist
         let loaded = try XCTUnwrap(ConfigLoader.load(path: path))
         XCTAssertEqual(loaded, c)
@@ -431,8 +438,8 @@ final class BridgeDocumentCodingTests: XCTestCase {
             source: Source(kind: .fhir, fileName: "x.json", sha256: "deadbeef",
                            extractedAt: Date(timeIntervalSince1970: 1_700_000_000),
                            extractor: Extractor(engine: "fhir-parser", version: "0.1.0")),
-            subject: SubjectRef(id: "uuid-1", label: "Caleb", hash: "abcd",
-                                name: "Caleb Feather", dob: "2015-04-12"),
+            subject: SubjectRef(id: "uuid-1", label: "Jane", hash: "abcd",
+                                name: "Jane Public", dob: "2000-01-01"),
             observations: [obs])
     }
     func testRoundTrip() throws {
@@ -653,12 +660,12 @@ import XCTest
 
 final class SubjectHashTests: XCTestCase {
     func testDeterministicAndCanonical() {
-        XCTAssertEqual(SubjectHash.make(name: "Caleb Feather", dob: "2015-04-12"),
-                       SubjectHash.make(name: "  caleb feather ", dob: "2015-04-12"))
+        XCTAssertEqual(SubjectHash.make(name: "Jane Public", dob: "2000-01-01"),
+                       SubjectHash.make(name: "  jane public ", dob: "2000-01-01"))
     }
     func testDifferentPeopleDiffer() {
-        XCTAssertNotEqual(SubjectHash.make(name: "Caleb Feather", dob: "2015-04-12"),
-                          SubjectHash.make(name: "Stephen Feather", dob: "1975-01-01"))
+        XCTAssertNotEqual(SubjectHash.make(name: "Jane Public", dob: "2000-01-01"),
+                          SubjectHash.make(name: "John Sample", dob: "1980-06-15"))
     }
 }
 ```
@@ -1370,11 +1377,11 @@ Create fixtures:
 mkdir -p Tests/healthbridgeTests/Fixtures
 cp Tests/HealthBridgeParsingTests/Fixtures/bundle-vitals-and-labs.json Tests/healthbridgeTests/Fixtures/bundle-vitals-and-labs.json
 ```
-`Fixtures/patient-bundle.json` (Patient matches subject "Caleb Feather" / 2015-04-12):
+`Fixtures/patient-bundle.json` (Patient matches subject "Jane Public" / 2000-01-01):
 ```json
 { "resourceType": "Bundle", "type": "collection", "entry": [
   { "resource": { "resourceType": "Patient", "id": "p1",
-    "name": [ { "family": "Feather", "given": ["Caleb"] } ], "birthDate": "2015-04-12" } },
+    "name": [ { "family": "Public", "given": ["Jane"] } ], "birthDate": "2000-01-01" } },
   { "resource": { "resourceType": "Observation", "id": "bw1", "status": "final",
     "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
     "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
@@ -1382,7 +1389,7 @@ cp Tests/HealthBridgeParsingTests/Fixtures/bundle-vitals-and-labs.json Tests/hea
     "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } } }
 ]}
 ```
-`Fixtures/patient-bundle-mismatch.json` — same as `patient-bundle.json` but Patient name `Stephen Feather`, birthDate `1975-01-01`.
+`Fixtures/patient-bundle-mismatch.json` — same as `patient-bundle.json` but Patient name `John Sample`, birthDate `1980-06-15`.
 `Fixtures/bundle-duplicate.json` — the body-weight observation twice (FHIR ids `bw1`/`bw1-dup`, identical content), no Patient.
 `Fixtures/empty-bundle.json`:
 ```json
@@ -1400,10 +1407,10 @@ final class BridgeBuilderTests: XCTestCase {
     private func fixture(_ n: String) throws -> Data {
         try Data(contentsOf: try XCTUnwrap(Bundle.module.url(forResource: "Fixtures/\(n)", withExtension: "json")))
     }
-    private let subject = SubjectRef(id: "11111111-1111-1111-1111-111111111111", label: "Caleb",
-                                     hash: "h", name: "Caleb Feather", dob: "2015-04-12")
+    private let subject = SubjectRef(id: "11111111-1111-1111-1111-111111111111", label: "Jane",
+                                     hash: "h", name: "Jane Public", dob: "2000-01-01")
     private let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
-    private func entry(_ name: String, _ dob: String, key: String = "caleb") -> SubjectEntry {
+    private func entry(_ name: String, _ dob: String, key: String = "jane") -> SubjectEntry {
         SubjectEntry(key: key, subjectId: "uuid", label: "L", name: name, dob: dob)
     }
 
@@ -1426,17 +1433,17 @@ final class BridgeBuilderTests: XCTestCase {
         XCTAssertEqual(a, b)
     }
     func testCrossCheckMatch() throws {
-        XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle"), subject: entry("Caleb Feather", "2015-04-12")), .match)
+        XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle"), subject: entry("Jane Public", "2000-01-01")), .match)
     }
     func testCrossCheckMismatch() throws {
-        XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle-mismatch"), subject: entry("Caleb Feather", "2015-04-12")), .mismatch)
+        XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle-mismatch"), subject: entry("Jane Public", "2000-01-01")), .mismatch)
     }
     func testCrossCheckNoPatient() throws {
-        XCTAssertEqual(PatientMatch.check(data: try fixture("bundle-duplicate"), subject: entry("Caleb Feather", "2015-04-12")), .noPatient)
+        XCTAssertEqual(PatientMatch.check(data: try fixture("bundle-duplicate"), subject: entry("Jane Public", "2000-01-01")), .noPatient)
     }
     func testCrossCheckFlexibleMiddleName() throws {
-        // Roster "Caleb Feather" should still match a document Patient "Caleb John Feather" (first+last tokens).
-        XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle"), subject: entry("Caleb John Feather", "2015-04-12")), .match)
+        // Roster "Jane Public" should still match a document Patient "Jane Q Public" (first+last tokens).
+        XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle"), subject: entry("Jane Q Public", "2000-01-01")), .match)
     }
 }
 ```
@@ -1464,7 +1471,7 @@ final class CLIRunTests: XCTestCase {
         let dir = NSTemporaryDirectory() + "hbcli-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let path = dir + "/config.toml"
-        let r = try run(["subject", "add", "--label", "Caleb", "--name", "Caleb Feather", "--dob", "2015-04-12", "--config", path])
+        let r = try run(["subject", "add", "--label", "Jane", "--name", "Jane Public", "--dob", "2000-01-01", "--config", path])
         XCTAssertEqual(r.status, 0, r.err)
         return path
     }
@@ -1479,24 +1486,24 @@ final class CLIRunTests: XCTestCase {
         XCTAssertNotEqual(r.status, 0)
     }
     func testPatientMismatchRefuses() throws {
-        let r = try run(["parse", try fixturePath("patient-bundle-mismatch"), "--config", try tmpConfig(), "--subject", "caleb"])
+        let r = try run(["parse", try fixturePath("patient-bundle-mismatch"), "--config", try tmpConfig(), "--subject", "jane"])
         XCTAssertNotEqual(r.status, 0)
     }
     func testWritesOutputAndSummary() throws {
         let cfg = try tmpConfig()
         let dataRoot = NSTemporaryDirectory() + "hbdata-\(UUID().uuidString)"
-        let r = try run(["parse", try fixturePath("patient-bundle"), "--config", cfg, "--subject", "caleb", "--data-root", dataRoot])
+        let r = try run(["parse", try fixturePath("patient-bundle"), "--config", cfg, "--subject", "jane", "--data-root", dataRoot])
         XCTAssertEqual(r.status, 0, r.err)
         XCTAssertTrue(r.err.contains("observations"))
     }
     func testQuietSuppressesSummary() throws {
-        let r = try run(["parse", try fixturePath("patient-bundle"), "--config", try tmpConfig(), "--subject", "caleb",
+        let r = try run(["parse", try fixturePath("patient-bundle"), "--config", try tmpConfig(), "--subject", "jane",
                          "--data-root", NSTemporaryDirectory() + "q-\(UUID().uuidString)", "--quiet"])
         XCTAssertEqual(r.status, 0, r.err)
         XCTAssertFalse(r.err.contains("observations"))
     }
     func testVerboseAndQuietTogetherErrors() throws {
-        let r = try run(["parse", try fixturePath("patient-bundle"), "--config", try tmpConfig(), "--subject", "caleb",
+        let r = try run(["parse", try fixturePath("patient-bundle"), "--config", try tmpConfig(), "--subject", "jane",
                          "--verbose", "--quiet"])
         XCTAssertNotEqual(r.status, 0)
     }
@@ -1680,8 +1687,8 @@ Delete `Sources/healthbridge/main.swift`.
 
 - [ ] **Step 6: Manual end-to-end**
 ```
-swift run healthbridge subject add --label "Caleb" --name "Caleb Feather" --dob 2015-04-12 --config /tmp/hb.toml
-swift run healthbridge parse Tests/healthbridgeTests/Fixtures/patient-bundle.json --subject caleb --config /tmp/hb.toml --data-root /tmp/hbdata
+swift run healthbridge subject add --label "Jane" --name "Jane Public" --dob 2000-01-01 --config /tmp/hb.toml
+swift run healthbridge parse Tests/healthbridgeTests/Fixtures/patient-bundle.json --subject jane --config /tmp/hb.toml --data-root /tmp/hbdata
 ```
 Expected: subject added (prints a UUID); parse writes `/tmp/hbdata/subjects/<uuid>/<sha>.bridge.json`, prints the summary incl. unmapped lines. Clean up `/tmp/hb.toml` and `/tmp/hbdata` after.
 
@@ -1703,4 +1710,20 @@ github-agent-commit "feat(cli): parse + subject subcommands, cross-check, per-su
 **Placeholder scan:** no TBD/"adjust if tests fail"/"similar to"; every code step has complete code. The lone real-API risk is `ModelsR4`'s `DateTime`/`FHIRTime` field shapes used in `FHIRDate` (e.g. `time.second` as `Decimal`, `date.month`/`day` as optional `UInt8`); the date-only and timestamp tests pin the behavior.
 
 **Type consistency:** `DocumentParser.parse(_:subjectId:)` identical across Tasks 7–9. `ObservationID.derive(subjectId:…)` content-based, used by `FHIRParser.build` and asserted in Task 4. `BridgeBuilder.build(data:fileName:subject:now:) -> BuildResult` (clock injected) used by the CLI and Task 9 tests. `PatientMatchResult` enum drives the CLI's `--force`/`--allow-unverified-subject` policy. `SubjectRef` (document) vs `SubjectEntry` (roster) distinct by design; the roster entry resolves into the document's `SubjectRef`. `Config.addSubject`/`ConfigError.duplicateKey`, `ConfigWriter.write`, `TOMLCodec`, `MappingTable.resolve`, `SubjectHash.make`, `validate` referenced consistently.
-```
+
+---
+
+## Risk Mitigations (Pre-Mortem)
+
+**Run:** 2026-06-23, deep mode, on this plan. **Tigers:** 2 · **Elephants:** 2.
+
+### Tigers addressed
+1. **Real patient identity in committed fixtures (HIGH).** All fixtures/tests originally used a real person's name + DOB on a public repo. *Mitigation:* scrubbed every identity to synthetic ("Jane Public" / "John Sample", DOB `2000-01-01`/`1980-06-15`) across plan and spec; added a content-scanning denylist gate to **Task 0 Step 4(b)**, to be re-run before any fixture commit. Filename-only PHI checks do not catch this.
+2. **Teammate commit environment (MEDIUM).** `GITHUB_APP_*` may not direnv-load in a worktree subdir / fresh teammate shell. *Mitigation:* commit-protocol now requires each executor to run the Task 0 Step 2 env check **in the shell it commits from**, before its first `github-agent-commit`.
+
+### Accepted risks (elephants)
+3. **M1 cannot process the operator's real records (HIGH, accepted).** Real source data is C-CDA (Privia) + PDF (Piedmont); M1 ingests FHIR R4 JSON only. M1 is the foundation + FHIR path; real-document utility arrives with **M2 (C-CDA)**. Accepted as deliberate lowest-risk-first sequencing.
+4. **HealthKit write is deferred/undemonstrated (MEDIUM, accepted).** The endgame (data into Apple Health) lives in the later iOS writer. Accepted because third-party `HKQuantityType` writes are a known-supported API; a write spike can de-risk before the iOS milestone if desired.
+
+### Paper tigers (no action)
+- `FHIRDate`/TOMLKit API spellings — isolated (adapter) + TDD-caught. · BP systolic/diastolic mapping — fixed by Task 8 component handling. · Double JSON parse — perf only, small documents.
