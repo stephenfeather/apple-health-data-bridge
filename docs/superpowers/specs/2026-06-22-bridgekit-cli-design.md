@@ -42,7 +42,7 @@ BridgeDocument
 │   └─ extractor: { engine: String, version: String }
 ├─ subject:                            // REQUIRED — binds the document to a person
 │   ├─ id: String                      // UUID, assigned at enrollment (roster)
-│   ├─ label: String                   // human label, e.g. "Caleb"
+│   ├─ label: String                   // human label, e.g. "Jane"
 │   ├─ hash: String                    // sha256(canonical name|dob) — verification
 │   ├─ name?: String
 │   └─ dob?: String
@@ -114,7 +114,7 @@ Multiple medical users may run under one macOS account (e.g. a parent processing
 
 Roster entries are CLI-managed so humans never hand-write UUIDs:
 ```
-healthbridge subject add --label "Caleb" --name "Caleb Feather" --dob 2015-04-12
+healthbridge subject add --label "Jane" --name "Jane Public" --dob 2000-01-01
   → generates UUID, computes name|dob hash, writes the roster entry, prints the subjectId
 healthbridge subject list
 ```
@@ -123,7 +123,7 @@ healthbridge subject list
 
 The core risk is one subject's data reaching another's device. Two gates:
 
-- **At processing (M1, Mac):** `parse` requires a selected subject and cross-checks it against the document's FHIR `Patient`. `PatientMatch` returns a four-state result — `match` / `mismatch` / `noPatient` / `incomplete` (Patient present but missing a usable name/dob). Name comparison is **token-based** (case-insensitive first+last name + dob), not a brittle full-string hash, so "Caleb John Feather" vs "Caleb Feather" still matches. Policy: `match` and `noPatient` proceed; `mismatch` refuses unless `--force`; `incomplete` refuses unless `--allow-unverified-subject`. On refusal the CLI prints the document's extracted name/dob alongside the roster's, so the operator sees exactly what failed. Handles both `Bundle`-wrapped and bare `Patient` resources.
+- **At processing (M1, Mac):** `parse` requires a selected subject and cross-checks it against the document's FHIR `Patient`. `PatientMatch` returns a four-state result — `match` / `mismatch` / `noPatient` / `incomplete` (Patient present but missing a usable name/dob). Name comparison is **token-based** (case-insensitive first+last name + dob), not a brittle full-string hash, so "Jane Q Public" vs "Jane Public" still matches. Policy: `match` and `noPatient` proceed; `mismatch` refuses unless `--force`; `incomplete` refuses unless `--allow-unverified-subject`. On refusal the CLI prints the document's extracted name/dob alongside the roster's, so the operator sees exactly what failed. Handles both `Bundle`-wrapped and bare `Patient` resources.
 - **At write (later, iOS):** the device is configured once with its owner's `subject.id`; the writer **refuses any Bridge Document whose `subject.id` ≠ the device owner**, and the mandatory review screen shows the document's name/dob for human confirmation.
 
 ### 4.4 Storage layout
