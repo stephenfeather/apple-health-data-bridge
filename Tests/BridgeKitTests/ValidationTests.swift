@@ -27,6 +27,8 @@ final class ValidationTests: XCTestCase {
     func testInvalidSubjectUUID() { XCTAssertTrue(errors(doc([obs()], subjectId: "not-a-uuid"))) }
     func testEmptySubjectHash() { XCTAssertTrue(errors(doc([obs()], hash: ""))) }
     func testDuplicateIDs() { XCTAssertTrue(validate(doc([obs("a"), obs("a")])).contains { $0.message.contains("duplicate") }) }
+    func testEmptyObservationId() { XCTAssertTrue(errors(doc([obs("")]))) }
+    func testConfidenceOutOfRange() { XCTAssertTrue(errors(doc([obs(confidence: 1.5)]))) }
     func testEmptyObservationName() { XCTAssertTrue(errors(doc([obs(name: "")]))) }
     func testNonFiniteValue() { XCTAssertTrue(errors(doc([obs(value: .quantity(.nan))]))) }
     func testMappingOnString() {
