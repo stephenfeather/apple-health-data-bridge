@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.xcuserstate
+
+# Secrets & environment — never commit
+.env
+.env.*
+!.env.example
+.envrc
+*.pem
+*.p12
+credentials.json
+
+# Local project memory / agent config (machine-local, not part of the repo)
+CLAUDE.md
+.claude/
+
+# Local agent & editor tooling
+.codegraph/
+.cursor/
+.gemini/
+.tldr/
+.tldrignore
+.mcp.json
+opencode.jsonc
+
+# Local clinical sample data — PHI must never be committed
+samples/private/
+*.bridge.json
