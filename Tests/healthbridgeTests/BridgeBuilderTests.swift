@@ -4,8 +4,8 @@ import HealthBridgeConfig
 @testable import healthbridge
 
 final class BridgeBuilderTests: XCTestCase {
-    private func fixture(_ n: String) throws -> Data {
-        try Data(contentsOf: try XCTUnwrap(Bundle.module.url(forResource: "Fixtures/\(n)", withExtension: "json")))
+    private func fixture(_ n: String, _ ext: String = "json") throws -> Data {
+        try Data(contentsOf: try XCTUnwrap(Bundle.module.url(forResource: "Fixtures/\(n)", withExtension: ext)))
     }
     private let subject = SubjectRef(id: "11111111-1111-1111-1111-111111111111", label: "Jane",
                                      hash: "h", name: "Jane Public", dob: "2000-01-01")
@@ -44,5 +44,32 @@ final class BridgeBuilderTests: XCTestCase {
     func testCrossCheckFlexibleMiddleName() throws {
         // Roster "Jane Public" should still match a document Patient "Jane Q Public" (first+last tokens).
         XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle"), subject: entry("Jane Q Public", "2000-01-01")), .match)
+    }
+
+    // MARK: C-CDA wiring
+    func testBuildsFromCCDAStampsKind() throws {
+        let r = try BridgeBuilder.build(data: try fixture("ccda-patient", "xml"), fileName: "c.xml", subject: subject, now: fixedNow)
+        XCTAssertEqual(r.document.source.kind, .ccda)
+        XCTAssertEqual(r.document.source.extractor.engine, "ccda-parser")
+        XCTAssertGreaterThan(r.document.observations.count, 0)
+        XCTAssertFalse(validate(r.document).contains { $0.severity == .error })
+    }
+    func testBuildsFromFHIRStillStampsFHIR() throws {
+        let r = try BridgeBuilder.build(data: try fixture("bundle-vitals-and-labs"), fileName: "f.json", subject: subject, now: fixedNow)
+        XCTAssertEqual(r.document.source.kind, .fhir)
+        XCTAssertEqual(r.document.source.extractor.engine, "fhir-parser")
+    }
+    func testUnrecognizedFormatThrows() {
+        XCTAssertThrowsError(try BridgeBuilder.build(data: Data("nonsense".utf8), fileName: "x", subject: subject, now: fixedNow))
+    }
+    func testCCDACrossCheckMatch() throws {
+        XCTAssertEqual(PatientMatch.check(data: try fixture("ccda-patient", "xml"), subject: entry("Jane Public", "2000-01-01")), .match)
+    }
+    func testCCDACrossCheckMismatch() throws {
+        XCTAssertEqual(PatientMatch.check(data: try fixture("ccda-patient-mismatch", "xml"), subject: entry("Jane Public", "2000-01-01")), .mismatch)
+    }
+    func testCCDAMultiPatientCrossCheckIsMismatch() throws {
+        // Defensive: even before the parser refuses in build(), a >1-patientRole C-CDA must not cross-check as match.
+        XCTAssertEqual(PatientMatch.check(data: try fixture("ccda-multi-patient", "xml"), subject: entry("Jane Public", "2000-01-01")), .mismatch)
     }
 }

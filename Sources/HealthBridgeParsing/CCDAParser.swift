@@ -156,6 +156,37 @@ public struct CCDAParser: DocumentParser {
         return cal.date(from: c)
     }
 
+    // MARK: patient demographics (for the CLI subject cross-check; CDAXML is module-internal)
+    /// One entry per recordTarget/patientRole/patient: name ("given… family") and dob (YYYY-MM-DD).
+    /// The CLI uses this for the subject cross-check and multi-patient detection without re-parsing
+    /// observations. Returns [] for non-C-CDA or unreadable input.
+    public static func patientDemographics(_ data: Data) -> [(name: String, dob: String)] {
+        guard CDAXML.isClinicalDocument(data),
+              let doc = try? CDAXML.document(data), let root = doc.rootElement() else { return [] }
+        let roles = (try? CDAXML.elements(root, localName: "patientRole")) ?? []
+        return roles.map { role in
+            let patient = CDAXML.child(role, localName: "patient")
+            let nameEl = patient.flatMap { CDAXML.child($0, localName: "name") }
+            let givens = (nameEl?.children?.compactMap { $0 as? XMLElement } ?? [])
+                .filter { $0.localName == "given" }
+                .compactMap { $0.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let family = nameEl.flatMap { CDAXML.child($0, localName: "family") }?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let name = (givens + [family]).filter { !$0.isEmpty }.joined(separator: " ")
+            let raw = patient.flatMap { CDAXML.child($0, localName: "birthTime") }
+                .flatMap { CDAXML.attr($0, "value") } ?? ""
+            return (name, formatHL7Date(raw))
+        }
+    }
+
+    /// HL7 date (YYYYMMDD[…]) -> "YYYY-MM-DD". Empty string when there are fewer than 8 leading digits.
+    static func formatHL7Date(_ s: String) -> String {
+        let digits = Array(s.prefix { $0.isNumber })
+        guard digits.count >= 8 else { return "" }
+        return "\(String(digits[0..<4]))-\(String(digits[4..<6]))-\(String(digits[6..<8]))"
+    }
+
     // MARK: single-subject binding (PHI-safety parity with M1)
     /// Conservative single-subject binding: a Bridge Document binds ONE person.
     /// More than one recordTarget/patientRole is refused (PHI-safety parity with M1). The decision

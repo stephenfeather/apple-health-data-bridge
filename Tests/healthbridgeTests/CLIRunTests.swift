@@ -5,8 +5,8 @@ final class CLIRunTests: XCTestCase {
         // The test bundle sits next to the built products in .build/<config>/.
         Bundle(for: CLIRunTests.self).bundleURL.deletingLastPathComponent().appendingPathComponent("healthbridge")
     }
-    private func fixturePath(_ n: String) throws -> String {
-        try XCTUnwrap(Bundle.module.url(forResource: "Fixtures/\(n)", withExtension: "json")).path
+    private func fixturePath(_ n: String, _ ext: String = "json") throws -> String {
+        try XCTUnwrap(Bundle.module.url(forResource: "Fixtures/\(n)", withExtension: ext)).path
     }
     @discardableResult
     private func run(_ args: [String]) throws -> (status: Int32, err: String) {
@@ -60,5 +60,29 @@ final class CLIRunTests: XCTestCase {
         // A bundle with >1 distinct Patient could leak another person's observations under the selected subject.
         let r = try run(["parse", try fixturePath("bundle-two-patients"), "--config", try tmpConfig(), "--subject", "jane"])
         XCTAssertNotEqual(r.status, 0)
+    }
+
+    // MARK: C-CDA end-to-end
+    func testParsesCCDAEndToEnd() throws {
+        let cfg = try tmpConfig()
+        let dataRoot = NSTemporaryDirectory() + "hbccda-\(UUID().uuidString)"
+        let r = try run(["parse", try fixturePath("ccda-patient", "xml"), "--config", cfg, "--subject", "jane", "--data-root", dataRoot])
+        XCTAssertEqual(r.status, 0, r.err)
+        XCTAssertTrue(r.err.contains("observations"))
+    }
+    func testCCDAMismatchRefuses() throws {
+        let r = try run(["parse", try fixturePath("ccda-patient-mismatch", "xml"), "--config", try tmpConfig(), "--subject", "jane"])
+        XCTAssertNotEqual(r.status, 0)
+    }
+    // SAFETY: --force overrides the subject cross-check, NOT the multi-patient refusal.
+    func testCCDAMultiPatientRefuses() throws {
+        let dataRoot = NSTemporaryDirectory() + "hbccda-mp-\(UUID().uuidString)"
+        let r = try run(["parse", try fixturePath("ccda-multi-patient", "xml"), "--config", try tmpConfig(),
+                         "--subject", "jane", "--force", "--data-root", dataRoot])
+        XCTAssertNotEqual(r.status, 0)   // --force must NOT bypass the parser's multi-patient refusal
+        // And no document may be written for a refused multi-patient doc.
+        let subjectsDir = dataRoot + "/subjects"
+        XCTAssertFalse(FileManager.default.fileExists(atPath: subjectsDir),
+                       "no Bridge Document should be written for a refused multi-patient C-CDA")
     }
 }
