@@ -29,6 +29,13 @@ final class CCDAParserTests: XCTestCase {
         XCTAssertEqual(CCDAParser.date(fromHL7TS: "20250319")?.timeIntervalSince1970 ?? -1,
                        1_742_342_400, accuracy: 1)
     }
+    // Codex A: Calendar normalizes out-of-range components; a malformed TS must be nil (→ .noDate skip),
+    // never a silently-wrong date that imports under the wrong effective date / id.
+    func testRejectsOutOfRangeHL7TS() {
+        XCTAssertNil(CCDAParser.date(fromHL7TS: "20251340"))        // month 13 / day 40
+        XCTAssertNil(CCDAParser.date(fromHL7TS: "20250230"))        // Feb 30
+        XCTAssertNil(CCDAParser.date(fromHL7TS: "20250101999900"))  // 99:99:00
+    }
     func testParsesSingleVital() throws {
         let o = try XCTUnwrap(parse("ccda-minimal").observations.first { $0.code?.code == "29463-7" })
         XCTAssertEqual(o.code?.system, "http://loinc.org")
@@ -112,6 +119,14 @@ final class CCDAParserTests: XCTestCase {
         if case .string(let s) = o.value { XCTAssertEqual(s, "Hypertension") } else { XCTFail("expected .string") }
         XCTAssertNil(o.mapping)
     }
+    // Codex B (safety): a negated assertion (negationInd="true", "no penicillin allergy") must NOT
+    // become a positive observation — the schema has no polarity field, so emit nothing and log a skip.
+    func testNegatedProblemIsSkippedNotEmitted() throws {
+        let r = try parse("ccda-negated-problem")
+        XCTAssertTrue(r.observations.isEmpty, "negated assertion must not be emitted as a present condition")
+        XCTAssertEqual(r.skipped.first?.reason, .negated)
+    }
+
     func testParsesAllergyAsStringOther() throws {
         let o = try XCTUnwrap(try parse("ccda-allergies").observations.first)
         XCTAssertEqual(o.category, .other)

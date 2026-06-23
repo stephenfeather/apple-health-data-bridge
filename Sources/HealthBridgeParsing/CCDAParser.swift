@@ -89,9 +89,22 @@ public struct CCDAParser: DocumentParser {
 
     private enum ConvertResult { case success(Observation); case failure(Skip) }
 
+    /// True when the observation (or an ancestor act) carries negationInd="true" — e.g. "no penicillin
+    /// allergy". The Bridge schema has no polarity field, so a negated assertion must be dropped rather
+    /// than emitted as a present condition (an inversion of clinical meaning).
+    private func isNegated(_ el: XMLElement) -> Bool {
+        var node: XMLElement? = el
+        while let cur = node {
+            if CDAXML.attr(cur, "negationInd") == "true" { return true }
+            node = cur.parent as? XMLElement
+        }
+        return false
+    }
+
     private func quantitative(_ observation: XMLElement, category: ObservationCategory, subjectId: String) -> ConvertResult {
         let codeEl = CDAXML.child(observation, localName: "code")
         let display = codeEl.flatMap { CDAXML.attr($0, "displayName") } ?? "Unknown"
+        if isNegated(observation) { return .failure(Skip(reason: .negated, label: display)) }
         guard let codeEl, CDAXML.attr(codeEl, "codeSystem") == Self.loincOID,
               let code = CDAXML.attr(codeEl, "code") else {
             return .failure(Skip(reason: .noCode, label: display))
@@ -118,6 +131,7 @@ public struct CCDAParser: DocumentParser {
         for observation in observationElements(in: section) {
             let codeEl = CDAXML.child(observation, localName: "code")
             let display = codeEl.flatMap { CDAXML.attr($0, "displayName") } ?? "Problem"
+            if isNegated(observation) { skips.append(Skip(reason: .negated, label: display)); continue }
             guard let codeEl, CDAXML.attr(codeEl, "codeSystem") == Self.loincOID,
                   let code = CDAXML.attr(codeEl, "code") else {
                 skips.append(Skip(reason: .noCode, label: display)); continue
@@ -165,7 +179,14 @@ public struct CCDAParser: DocumentParser {
         } else {
             cal.timeZone = TimeZone(identifier: "UTC")!   // timezone-less / date-only -> UTC
         }
-        return cal.date(from: c)
+        guard let date = cal.date(from: c) else { return nil }
+        // Calendar.date(from:) NORMALIZES out-of-range components (day 40 -> next month, 99:99 -> rollover)
+        // instead of failing. Round-trip with the SAME calendar/timezone and reject if any parsed field
+        // changed — a malformed timestamp must be nil (→ .noDate skip), never a silently-wrong date.
+        let rt = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        guard rt.year == c.year, rt.month == c.month, rt.day == c.day,
+              rt.hour == c.hour, rt.minute == c.minute, rt.second == c.second else { return nil }
+        return date
     }
 
     // MARK: patient demographics (for the CLI subject cross-check; CDAXML is module-internal)
