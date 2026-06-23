@@ -143,7 +143,7 @@ No network in tests. Test inputs are public FHIR examples (no PHI); the real Pri
 1. **FHIR version target — RESOLVED: R4.** What production EHRs emit; supported by Apple's `FHIRModels` (ModelsR4). Test corpus = the official R4 example resources.
 2. **FHIR serialization — RESOLVED: JSON.** Consume FHIR JSON via `FHIRModels`. No `XMLParser` on the FHIR path. (C-CDA, when it lands, is XML-only and gets its own `XMLParser`-based parser conforming to `DocumentParser`.)
 3. **`FHIRModels` dependency — RESOLVED: adopt it.** Use Apple's open-source `FHIRModels` package (ModelsR4) rather than a hand-rolled decoder.
-4. **C-CDA in M1 or M2? — OPEN (recommend M2).** With FHIR now JSON-via-`FHIRModels` and C-CDA being XML-only, the two parsers share no decoding machinery, so folding C-CDA into M1 adds meaningful scope. Recommend shipping FHIR in M1 and C-CDA in M2; both conform to the same `DocumentParser` protocol so the deferral costs nothing architecturally.
+4. **C-CDA in M1 or M2? — RESOLVED: M2.** FHIR (JSON via `FHIRModels`) ships in M1; the C-CDA (XML) parser lands in M2. The two share no decoding machinery, so deferring C-CDA keeps M1 focused; both conform to the same `DocumentParser` protocol, so the deferral costs nothing architecturally.
 
 ---
 
