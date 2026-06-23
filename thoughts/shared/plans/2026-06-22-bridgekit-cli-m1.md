@@ -2,24 +2,26 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship an all-Swift package that parses a FHIR R4 JSON medical-record document into a validated `*.bridge.json` Bridge Document, with each observation pre-resolved against a LOINC→HealthKit mapping table.
+**Goal:** Ship an all-Swift package that parses a FHIR R4 JSON medical-record document into a validated, subject-bound `*.bridge.json` Bridge Document, driven by a layered TOML config, with each observation pre-resolved against a LOINC→HealthKit mapping table and written to per-subject storage.
 
-**Architecture:** A single Swift Package Manager package with three targets. `BridgeKit` (platform-pure library: schema, mapping table, ID derivation, validation — no FHIR dependency). `HealthBridgeParsing` (library: `DocumentParser` protocol + `FHIRParser`, depends on `BridgeKit` + Apple's `FHIRModels`). `healthbridge` (executable: an `ArgumentParser` CLI that wires file I/O → parse → resolve → validate → write). Data flows one direction: FHIR JSON → `[Observation]` → resolve mapping → `BridgeDocument` → JSON file.
+**Architecture:** One Swift Package Manager package. `BridgeKit` (platform-pure library: schema, mapping, ID derivation, subject hash, validation). `HealthBridgeConfig` (library: TOML config model + layered settings + config read/write). `HealthBridgeParsing` (library: `DocumentParser` protocol + `FHIRParser`, depends on `BridgeKit` + `FHIRModels`). `healthbridge` (executable: `ArgumentParser` CLI with `parse` and `subject` subcommands). Data flows: config+flags → resolved `Settings`; FHIR JSON → `[Observation]` → resolve mapping → dedupe → subject-bound `BridgeDocument` → JSON file under the subject's storage dir.
 
-**Tech Stack:** Swift 5.9+, Swift Package Manager, Apple `FHIRModels` (`ModelsR4` product), `swift-argument-parser`, `CryptoKit` (SHA-256, built-in on Apple platforms).
+**Tech Stack:** Swift 5.9+, SwiftPM, Apple `FHIRModels` (`ModelsR4`), `swift-argument-parser`, `TOMLKit`, `CryptoKit` (SHA-256, built-in).
 
 ## Global Constraints
 
-- Swift tools version: **5.9**. Platforms: **`.macOS(.v13)`, `.iOS(.v16)`** (BridgeKit must compile for iOS for the future writer app; `CryptoKit` is available on both).
-- Dependencies (exact products): `FHIRModels` → product **`ModelsR4`**; `swift-argument-parser` → product **`ArgumentParser`**. Pin to the latest resolved version during Task 1 and record it.
-- `BridgeKit` MUST NOT import `ModelsR4`, `ArgumentParser`, or any non-Apple framework. Only `Foundation` + `CryptoKit`.
-- Bridge Document JSON encoding is **deterministic**: `JSONEncoder` with `outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]` and `dateEncodingStrategy = .iso8601`; decoder uses `dateDecodingStrategy = .iso8601`.
-- `schemaVersion` current value: **1**.
-- FHIR-derived observations always carry `confidence = 1.0`.
-- LOINC system URI is the string **`http://loinc.org`**.
-- **No network in tests.** All FHIR fixtures are checked-in JSON files. **No PHI** in the repo — fixtures are synthetic or drawn from public FHIR examples.
-- TDD throughout: failing test first, minimal implementation, green, commit. Commit after every task.
-- **Commit protocol (OVERRIDES the per-step `git commit` lines):** All implementation runs in a **git worktree on a feature branch** (never on `main`). Each task's "Commit" step means: `git add <the exact files listed>` (use `git rm` for deletions), then **`github-agent-commit "<the message shown>"`** — NOT plain `git commit` (the repo forbids unsigned commits, and the signed helper refuses `main`). After `github-agent-commit` returns, it resets the local branch to `origin/<branch>`, so **stage every intended change before committing** (unstaged tracked edits are wiped; untracked/`.build` artifacts survive). Before the first commit, confirm `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY` are set in the shell (they load via the repo `.envrc`/direnv); if empty, stop and report rather than falling back to `git commit`. The whole milestone lands as **one PR** to `main` at the end via `agent-gh pr create`.
+- Swift tools version **5.9**. Platforms **`.macOS(.v13)`, `.iOS(.v16)`** (`BridgeKit` must compile for iOS; `CryptoKit` is on both).
+- Verified dependency versions: **FHIRModels 0.9.3**, **swift-argument-parser 1.8.2**. `TOMLKit` is pinned at scaffold time (Task 1). **`Package.resolved` IS committed** (reproducible dependency pins) — it is *not* gitignored.
+- `BridgeKit` imports only `Foundation` + `CryptoKit` — never `ModelsR4`, `ArgumentParser`, `TOMLKit`.
+- Bridge Document JSON is **deterministic**: `JSONEncoder` with `outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]`, `dateEncodingStrategy = .iso8601`; decoder `dateDecodingStrategy = .iso8601`. Dates normalize to **whole-second UTC** (no fractional seconds). FHIR dates lacking a timezone are resolved **in UTC**, never `TimeZone.current`, so the same input yields the same `Date`/id on any machine.
+- `schemaVersion` current value: **1**. FHIR-derived observations carry `confidence = 1.0`.
+- LOINC system URI: **`http://loinc.org`**.
+- **Settings precedence (hard rule): CLI flag > TOML config > built-in default.** Every scalar config setting has a matching `--flag`. (The subject *roster* is a managed collection, not a scalar setting — managed via `healthbridge subject add/list`, selected per-run with `--subject <key>`.)
+- **Subject binding:** every Bridge Document carries a required nested `subject` with `subject.id` (UUID), `subject.label`, and `subject.hash` (`sha256` of canonical `name|dob`). The CLI cross-checks the selected subject against the FHIR `Patient` and refuses on mismatch.
+- **Observation id is content-based:** `ObservationID.derive` hashes `subject.id + code.system + code.code + effectiveDate + rawValue + unit` — **no `documentKey`**. The same clinical observation gets the same id across files (it becomes the iOS `HKMetadataKeySyncIdentifier`, which must be stable forever), so cross-file duplicates collapse via the sync id. Within-file dedupe (keep first) still runs in the builder.
+- **No network in tests.** Fixtures are checked-in JSON/TOML. **No PHI** in the repo (synthetic/public data only); processed `*.bridge.json` are gitignored and never committed.
+- **Commit protocol — NEVER run `git commit` or `git push`.** All implementation runs in a **git worktree on a feature branch** (never `main`; created in Task 0). Each "Commit" step: `git add <files>` (and `git rm` for deletions) to stage — the only raw git permitted, because `github-agent-commit` reads `git diff --cached` — then **`github-agent-commit "<message>"`** (signed; refuses `main`; auto-creates the remote branch; resets local to `origin/<branch>` after, so stage everything first). Do NOT run `git commit`/`push`/`fetch`/`reset`/`checkout`/`update-ref`; read-only `git status`/`git diff` is fine. All GitHub API / PRs use **`agent-gh`**, never raw `gh`. The milestone lands as **one PR** to `main` via `agent-gh pr create … --body-file <file>`. **Per-shell env (multi-agent):** the `GITHUB_APP_*` vars load via direnv from the repo-root `.envrc`, which may NOT auto-load inside a worktree subdir or a teammate's fresh shell. Every executor must run the Task 0 Step 2 env check **in the exact shell it will commit from**, before its first `github-agent-commit`; if empty there, `direnv allow` at the worktree path or export the three vars — never fall back to `git commit`.
+- TDD throughout: failing test first, minimal implementation, green, commit.
 
 ---
 
@@ -27,35 +29,80 @@
 
 ```
 Package.swift
+Package.resolved            # committed
 Sources/
   BridgeKit/
-    BridgeDocument.swift        # BridgeDocument, Source, SourceKind, Extractor, Subject
-    Observation.swift           # Observation, ObservationValue (custom Codable), ObservationCategory, CodeableRef, SourceLocator
-    HealthKitMapping.swift      # HealthKitMapping struct
-    BridgeJSON.swift            # configured encoder/decoder (deterministic)
-    ObservationID.swift         # deriveObservationID(...)
-    MappingTable.swift          # MappingEntry, the table, resolveMapping(_:), unit conversion
-    Validation.swift            # ValidationIssue, validate(_:)
+    BridgeDocument.swift     # BridgeDocument, Source, SourceKind, Extractor, SubjectRef
+    Observation.swift        # Observation, ObservationValue, ObservationCategory, CodeableRef, SourceLocator
+    HealthKitMapping.swift
+    BridgeJSON.swift
+    ObservationID.swift      # content-based id (subject.id + code + date + value + unit)
+    SubjectHash.swift        # canonical sha256(name|dob)
+    MappingTable.swift
+    Validation.swift
+  HealthBridgeConfig/
+    Config.swift             # TOML model: Config, SubjectEntry, addSubject, ConfigError
+    TOMLCodec.swift          # thin TOMLKit decode/encode adapter (isolates the dependency)
+    Settings.swift           # Settings, LogLevel, Overrides, SettingsResolver, ConfigLoader, ConfigWriter
   HealthBridgeParsing/
-    DocumentParser.swift        # DocumentParser protocol, ParseError
-    FHIRParser.swift            # FHIRParser: FHIR R4 JSON -> [Observation]
+    DocumentParser.swift     # DocumentParser protocol, ParseResult, Skip, ParseError
+    FHIRDate.swift           # UTC-stable FHIR DateTime/Instant -> Date
+    FHIRParser.swift
   healthbridge/
-    HealthBridge.swift          # @main ParsableCommand root + `parse` subcommand
+    HealthBridge.swift       # @main root + Parse + Subject subcommands, BridgeBuilder, PatientMatch
 Tests/
-  BridgeKitTests/
-    BridgeDocumentCodingTests.swift
-    ObservationIDTests.swift
-    MappingTableTests.swift
-    ValidationTests.swift
-  HealthBridgeParsingTests/
-    FHIRParserTests.swift
-    Fixtures/
-      observation-bodyweight.json
-      bundle-vitals-and-labs.json
-  healthbridgeTests/
-    CLIIntegrationTests.swift
-    Fixtures/
-      bundle-vitals-and-labs.json   # copy used by CLI test
+  BridgeKitTests/...
+  HealthBridgeConfigTests/...
+  HealthBridgeParsingTests/{...,Fixtures/}
+  healthbridgeTests/{...,Fixtures/}
+```
+
+---
+
+## Task 0: Repository preflight (no commit)
+
+**Purpose:** the rest of the plan commits via `github-agent-commit`, which refuses `main`. Establish the worktree and verify the environment BEFORE any code is written. This task produces no commit.
+
+- [ ] **Step 1: Verify not on `main` / create the feature worktree**
+
+Use the `superpowers:using-git-worktrees` skill, or call `EnterWorktree({name: "bridgekit-m1"})` (creates the branch+worktree under `.claude/worktrees/`, switches the session in, and grants file-tool write access in one step). Then confirm:
+```
+git branch --show-current   # must NOT be "main" or "master"
+```
+Expected: a feature branch (e.g. `bridgekit-m1`). If it prints `main`, STOP and create the worktree.
+
+- [ ] **Step 2: Verify the GitHub App commit env**
+```
+for v in GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY; do
+  printf '%s: %s\n' "$v" "$(printenv "$v" >/dev/null 2>&1 && echo SET || echo empty)"
+done
+```
+Expected: all three `SET` (loaded via the repo `.envrc`/direnv). If any is `empty`, STOP and report — do not fall back to `git commit`.
+
+- [ ] **Step 3: Verify `.gitignore` policy**
+
+Confirm `.gitignore` **does NOT** ignore `Package.resolved` (it must be committed) and **does** ignore `*.bridge.json`:
+```
+git check-ignore -v Package.resolved   # expect: no match (exit 1)
+git check-ignore -v x.bridge.json      # expect: a match
+```
+
+- [ ] **Step 4: PHI guardrail — no private data tracked, no real identities in fixtures**
+
+(a) No processed output or private samples tracked:
+```
+git ls-files | rg -i 'bridge\.json$|samples/private/' && echo "PHI LEAK — STOP" || echo "clean"
+```
+(b) **No real patient identity in any tracked file.** All fixtures/tests use synthetic identities ONLY (e.g. "Jane Public" / "John Sample", DOB `2000-01-01`). Scan tracked content against a denylist of known real identifiers:
+Scoped to code + fixtures only (`Tests/`, `Sources/`) — patient identity must never appear there. Docs/plans are intentionally excluded (they discuss the denylist itself):
+```
+git ls-files -z 'Tests/**' 'Sources/**' | xargs -0 rg -l -i 'Feather|Caleb|Stephen|2015-04-12|1975-01-01' 2>/dev/null && echo "REAL IDENTITY — STOP" || echo "clean"
+```
+Expected: `clean` for both (at Task 0, `Tests/`/`Sources/` are empty → clean). If either prints, STOP and replace with synthetic data before any commit. **This is the gate the pre-mortem added** — filename checks alone do NOT catch a real name embedded in a committed `.json` fixture, and this is a public repo. Re-run check (b) before every commit that adds/edits fixtures.
+
+- [ ] **Step 5: Toolchain check**
+```
+swift --version   # expect Swift 5.9+ toolchain
 ```
 
 ---
@@ -64,12 +111,11 @@ Tests/
 
 **Files:**
 - Create: `Package.swift`
-- Create: `Sources/BridgeKit/BridgeKit.swift` (temporary placeholder)
+- Create stub sources: `Sources/BridgeKit/BridgeKit.swift`, `Sources/HealthBridgeConfig/Placeholder.swift`, `Sources/HealthBridgeParsing/Placeholder.swift`, `Sources/healthbridge/main.swift`
 - Test: `Tests/BridgeKitTests/SmokeTests.swift`
 
 **Interfaces:**
-- Consumes: nothing.
-- Produces: a buildable package exposing the `BridgeKit` library target.
+- Produces: a resolving, building package with `BridgeKit`, `HealthBridgeConfig`, `HealthBridgeParsing` libraries and the `healthbridge` executable.
 
 - [ ] **Step 1: Write `Package.swift`**
 
@@ -82,125 +128,297 @@ let package = Package(
     platforms: [.macOS(.v13), .iOS(.v16)],
     products: [
         .library(name: "BridgeKit", targets: ["BridgeKit"]),
+        .library(name: "HealthBridgeConfig", targets: ["HealthBridgeConfig"]),
         .library(name: "HealthBridgeParsing", targets: ["HealthBridgeParsing"]),
         .executable(name: "healthbridge", targets: ["healthbridge"]),
     ],
     dependencies: [
         // Verified resolved versions: FHIRModels 0.9.3, swift-argument-parser 1.8.2.
-        // FHIRModels is pre-1.0 (minor bumps may break) — pin to the 0.9.x line.
         .package(url: "https://github.com/apple/FHIRModels.git", .upToNextMinor(from: "0.9.3")),
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", .upToNextMinor(from: "1.8.2")),
+        .package(url: "https://github.com/LebJe/TOMLKit.git", from: "0.6.0"),
     ],
     targets: [
         .target(name: "BridgeKit"),
+        .target(name: "HealthBridgeConfig", dependencies: [.product(name: "TOMLKit", package: "TOMLKit")]),
         .target(
             name: "HealthBridgeParsing",
-            dependencies: [
-                "BridgeKit",
-                .product(name: "ModelsR4", package: "FHIRModels"),
-            ]
+            dependencies: ["BridgeKit", .product(name: "ModelsR4", package: "FHIRModels")]
         ),
         .executableTarget(
             name: "healthbridge",
             dependencies: [
-                "HealthBridgeParsing",
-                "BridgeKit",
+                "HealthBridgeParsing", "HealthBridgeConfig", "BridgeKit",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
         .testTarget(name: "BridgeKitTests", dependencies: ["BridgeKit"]),
-        // HealthBridgeParsingTests is added in Task 6; healthbridgeTests in Task 8.
-        // A test target with no .swift sources fails to build, so each test target is
-        // declared in the task that creates its first test file — NOT up front here.
+        // HealthBridgeConfigTests added in Task 2; HealthBridgeParsingTests in Task 8;
+        // healthbridgeTests in Task 9. A test target with no .swift sources fails to build,
+        // so each is declared in the task that creates its first test file.
     ]
 )
 ```
 
-> **Note (verified by building this exact manifest):** the package resolves/builds/tests/runs clean with these four targets. Each non-test target needs at least one compilable source so resolution succeeds:
-> - `Sources/BridgeKit/BridgeKit.swift` → `// BridgeKit — Bridge Document schema, mapping, and validation.` (library; comment-only is fine).
-> - `Sources/HealthBridgeParsing/Placeholder.swift` → `// placeholder, replaced in Task 6` (library; comment-only is fine).
-> - `Sources/healthbridge/main.swift` → `// placeholder entry point, replaced in Task 8`. **MUST be named `main.swift`.** An `.executableTarget` requires an entry point; SwiftPM treats `main.swift` as one even when it holds only a comment (verified: builds and `swift run healthbridge` exits 0). A comment-only `Placeholder.swift` here would fail `swift build` with a missing-entry-point error.
-> - No `Fixtures`/`.gitkeep` directories yet — the test targets that use them don't exist until Tasks 6/8.
+- [ ] **Step 2: Create stub sources**
 
-- [ ] **Step 2: Create the three stub sources**
+`Sources/BridgeKit/BridgeKit.swift` → `// BridgeKit — schema, mapping, validation.`
+`Sources/HealthBridgeConfig/Placeholder.swift` → `// placeholder, replaced in Task 2`
+`Sources/HealthBridgeParsing/Placeholder.swift` → `// placeholder, replaced in Task 7`
+`Sources/healthbridge/main.swift` → `// placeholder entry point, replaced in Task 9` (MUST be `main.swift` — an executable target needs an entry point; SwiftPM accepts a comment-only `main.swift`, verified).
 
-`Sources/BridgeKit/BridgeKit.swift`:
-```swift
-// BridgeKit — Bridge Document schema, mapping, and validation.
-```
-
-`Sources/HealthBridgeParsing/Placeholder.swift`:
-```swift
-// placeholder, replaced in Task 6
-```
-
-`Sources/healthbridge/main.swift` (note the filename — it is the executable entry point):
-```swift
-// placeholder entry point, replaced in Task 8
-```
-
-- [ ] **Step 3: Write the smoke test**
-
-`Tests/BridgeKitTests/SmokeTests.swift`:
+- [ ] **Step 3: Smoke test** — `Tests/BridgeKitTests/SmokeTests.swift`:
 ```swift
 import XCTest
 @testable import BridgeKit
 
 final class SmokeTests: XCTestCase {
-    func testPackageBuilds() {
-        XCTAssertTrue(true)
-    }
+    func testPackageBuilds() { XCTAssertTrue(true) }
 }
 ```
 
-- [ ] **Step 4: Resolve and build**
+- [ ] **Step 4: Resolve & build** — Run: `swift package resolve && swift build`. Expected: resolves FHIRModels 0.9.3, swift-argument-parser 1.8.2, and TOMLKit; `Package.resolved` is written and **will be committed**; builds clean. First build compiles FHIRModels from source (slow once).
 
-Run: `swift package resolve && swift build`
-Expected: resolves **FHIRModels 0.9.3** and **swift-argument-parser 1.8.2** (verified), builds with no errors. `Package.resolved` pins both. The first build compiles FHIRModels from source and takes a few minutes; subsequent builds are cached.
-
-- [ ] **Step 5: Run the smoke test**
-
-Run: `swift test --filter BridgeKitTests.SmokeTests`
-Expected: PASS.
+- [ ] **Step 5: Run smoke test** — Run: `swift test --filter BridgeKitTests.SmokeTests`. Expected: PASS.
 
 - [ ] **Step 6: Commit**
-
 ```
 git add Package.swift Package.resolved Sources Tests
-git commit -m "chore: scaffold SwiftPM package with BridgeKit, HealthBridgeParsing, healthbridge targets"
+github-agent-commit "chore: scaffold SwiftPM package (BridgeKit, Config, Parsing, CLI targets)"
 ```
 
 ---
 
-## Task 2: Bridge Document schema + deterministic JSON
+## Task 2: Config, layered Settings, and ConfigWriter
 
 **Files:**
-- Create: `Sources/BridgeKit/BridgeDocument.swift`
-- Create: `Sources/BridgeKit/Observation.swift`
-- Create: `Sources/BridgeKit/HealthKitMapping.swift`
-- Create: `Sources/BridgeKit/BridgeJSON.swift`
-- Delete: `Sources/BridgeKit/BridgeKit.swift` (placeholder no longer needed)
+- Modify: `Package.swift` (add `HealthBridgeConfigTests` target)
+- Create: `Sources/HealthBridgeConfig/Config.swift`, `Sources/HealthBridgeConfig/TOMLCodec.swift`, `Sources/HealthBridgeConfig/Settings.swift`
+- Delete: `Sources/HealthBridgeConfig/Placeholder.swift`
+- Test: `Tests/HealthBridgeConfigTests/SettingsTests.swift`, `Tests/HealthBridgeConfigTests/ConfigWriterTests.swift`
+
+**Interfaces:**
+- `struct Config: Codable, Equatable` — `dataRoot: String?`, `defaultSubject: String?`, `logLevel: String?`, `subjects: [SubjectEntry]` (snake_case TOML keys). `mutating func addSubject(_:) throws` rejects duplicate keys with `ConfigError.duplicateKey`.
+- `struct SubjectEntry: Codable, Equatable` — `key, subjectId, label, name, dob` (all `String`).
+- `enum ConfigError: Error, Equatable { case duplicateKey(String) }`.
+- `enum TOMLCodec { static func decode<T:Decodable>(_:from:) throws -> T; static func encode<T:Encodable>(_:) throws -> String }` — the ONLY place TOMLKit is touched.
+- `enum LogLevel`, `struct Overrides`, `struct Settings`, `enum ConfigLoader { static func load(path:) throws -> Config?; static var defaultPath }`, `enum ConfigWriter { static func write(_:path:) throws }`, `enum SettingsResolver { static func resolve(config:overrides:) -> Settings }` (precedence override ?? config ?? default; default `dataRoot` = `~/Documents/apple-health-data-bridge`).
+
+- [ ] **Step 1: Declare the test target** — add to `Package.swift` `targets:`:
+```swift
+        .testTarget(name: "HealthBridgeConfigTests", dependencies: ["HealthBridgeConfig"]),
+```
+
+- [ ] **Step 2: Write the failing tests** — `Tests/HealthBridgeConfigTests/SettingsTests.swift`:
+```swift
+import XCTest
+@testable import HealthBridgeConfig
+
+final class SettingsTests: XCTestCase {
+    private func config() -> Config {
+        Config(dataRoot: "~/from-toml", defaultSubject: "jane", logLevel: "normal",
+               subjects: [SubjectEntry(key: "jane", subjectId: "uuid-c", label: "Jane",
+                                       name: "Jane Public", dob: "2000-01-01")])
+    }
+    func testDefaultsWhenNoConfigNoOverrides() {
+        let s = SettingsResolver.resolve(config: nil, overrides: Overrides())
+        XCTAssertTrue(s.dataRoot.path.hasSuffix("Documents/apple-health-data-bridge"))
+        XCTAssertEqual(s.logLevel, .normal); XCTAssertNil(s.selectedSubject)
+    }
+    func testConfigOverridesDefault() {
+        let s = SettingsResolver.resolve(config: config(), overrides: Overrides())
+        XCTAssertTrue(s.dataRoot.path.hasSuffix("from-toml"))
+        XCTAssertEqual(s.selectedSubject?.key, "jane")
+    }
+    func testFlagOverridesConfig() {
+        let s = SettingsResolver.resolve(config: config(),
+                                         overrides: Overrides(dataRoot: "~/from-flag", subject: nil, logLevel: .verbose))
+        XCTAssertTrue(s.dataRoot.path.hasSuffix("from-flag")); XCTAssertEqual(s.logLevel, .verbose)
+    }
+    func testTildeExpanded() {
+        let s = SettingsResolver.resolve(config: nil, overrides: Overrides(dataRoot: "~/x"))
+        XCTAssertFalse(s.dataRoot.path.contains("~"))
+    }
+    func testSubjectSelectionByFlag() {
+        let s = SettingsResolver.resolve(config: config(), overrides: Overrides(subject: "jane"))
+        XCTAssertEqual(s.selectedSubject?.subjectId, "uuid-c")
+    }
+    func testAddSubjectRejectsDuplicateKey() {
+        var c = config()
+        XCTAssertThrowsError(try c.addSubject(SubjectEntry(key: "jane", subjectId: "x", label: "C", name: "n", dob: "d"))) {
+            XCTAssertEqual($0 as? ConfigError, .duplicateKey("jane"))
+        }
+    }
+}
+```
+`Tests/HealthBridgeConfigTests/ConfigWriterTests.swift`:
+```swift
+import XCTest
+@testable import HealthBridgeConfig
+
+final class ConfigWriterTests: XCTestCase {
+    private func tmpPath() -> String {
+        NSTemporaryDirectory() + "hb-\(UUID().uuidString)/config.toml"
+    }
+    func testWriteCreatesParentDirsAndRoundTrips() throws {
+        let path = tmpPath()
+        var c = Config(dataRoot: "~/Documents/x", defaultSubject: "jane", logLevel: "verbose")
+        try c.addSubject(SubjectEntry(key: "jane", subjectId: "uuid-c", label: "Jane",
+                                      name: "Jane Public", dob: "2000-01-01"))
+        try ConfigWriter.write(c, path: path)            // parent dir did not exist
+        let loaded = try XCTUnwrap(ConfigLoader.load(path: path))
+        XCTAssertEqual(loaded, c)
+        try? FileManager.default.removeItem(atPath: (path as NSString).deletingLastPathComponent)
+    }
+}
+```
+
+- [ ] **Step 3: Run to verify it fails** — Run: `swift test --filter HealthBridgeConfigTests`. Expected: FAIL — types undefined.
+
+- [ ] **Step 4: Implement** — `Sources/HealthBridgeConfig/Config.swift`:
+```swift
+import Foundation
+
+public struct SubjectEntry: Codable, Equatable, Sendable {
+    public var key: String
+    public var subjectId: String
+    public var label: String
+    public var name: String
+    public var dob: String
+    public init(key: String, subjectId: String, label: String, name: String, dob: String) {
+        self.key = key; self.subjectId = subjectId; self.label = label; self.name = name; self.dob = dob
+    }
+    enum CodingKeys: String, CodingKey {
+        case key, label, name, dob
+        case subjectId = "subject_id"
+    }
+}
+
+public enum ConfigError: Error, Equatable { case duplicateKey(String) }
+
+public struct Config: Codable, Equatable, Sendable {
+    public var dataRoot: String?
+    public var defaultSubject: String?
+    public var logLevel: String?
+    public var subjects: [SubjectEntry]
+    public init(dataRoot: String? = nil, defaultSubject: String? = nil,
+                logLevel: String? = nil, subjects: [SubjectEntry] = []) {
+        self.dataRoot = dataRoot; self.defaultSubject = defaultSubject
+        self.logLevel = logLevel; self.subjects = subjects
+    }
+    public mutating func addSubject(_ entry: SubjectEntry) throws {
+        if subjects.contains(where: { $0.key == entry.key }) { throw ConfigError.duplicateKey(entry.key) }
+        subjects.append(entry)
+    }
+    enum CodingKeys: String, CodingKey {
+        case subjects
+        case dataRoot = "data_root"
+        case defaultSubject = "default_subject"
+        case logLevel = "log_level"
+    }
+}
+```
+`Sources/HealthBridgeConfig/TOMLCodec.swift`:
+```swift
+import Foundation
+import TOMLKit
+
+/// The single point of contact with TOMLKit, so any API drift is contained to one file.
+public enum TOMLCodec {
+    public static func decode<T: Decodable>(_ type: T.Type, from text: String) throws -> T {
+        try TOMLDecoder().decode(type, from: text)
+    }
+    public static func encode<T: Encodable>(_ value: T) throws -> String {
+        try TOMLEncoder().encode(value)
+    }
+}
+```
+`Sources/HealthBridgeConfig/Settings.swift`:
+```swift
+import Foundation
+
+public enum LogLevel: String, Sendable { case quiet, normal, verbose }
+
+public struct Overrides: Sendable {
+    public var dataRoot: String?
+    public var subject: String?
+    public var logLevel: LogLevel?
+    public init(dataRoot: String? = nil, subject: String? = nil, logLevel: LogLevel? = nil) {
+        self.dataRoot = dataRoot; self.subject = subject; self.logLevel = logLevel
+    }
+}
+
+public struct Settings: Sendable {
+    public let dataRoot: URL
+    public let logLevel: LogLevel
+    public let subjects: [SubjectEntry]
+    public let selectedSubject: SubjectEntry?
+}
+
+public enum ConfigLoader {
+    public static var defaultPath: String {
+        (NSHomeDirectory() as NSString).appendingPathComponent(".config/apple-health-data-bridge/config.toml")
+    }
+    /// Returns nil if the file does not exist; throws on malformed TOML.
+    public static func load(path: String) throws -> Config? {
+        let expanded = (path as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: expanded) else { return nil }
+        let text = try String(contentsOfFile: expanded, encoding: .utf8)
+        return try TOMLCodec.decode(Config.self, from: text)
+    }
+}
+
+public enum ConfigWriter {
+    public static func write(_ config: Config, path: String) throws {
+        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        let toml = try TOMLCodec.encode(config)
+        try toml.write(to: url, atomically: true, encoding: .utf8)
+    }
+}
+
+public enum SettingsResolver {
+    private static let defaultDataRoot = "~/Documents/apple-health-data-bridge"
+
+    public static func resolve(config: Config?, overrides: Overrides) -> Settings {
+        let rawRoot = overrides.dataRoot ?? config?.dataRoot ?? defaultDataRoot
+        let dataRoot = URL(fileURLWithPath: (rawRoot as NSString).expandingTildeInPath)
+        let level = overrides.logLevel ?? config?.logLevel.flatMap(LogLevel.init(rawValue:)) ?? .normal
+        let subjects = config?.subjects ?? []
+        let selectedKey = overrides.subject ?? config?.defaultSubject
+        let selected = selectedKey.flatMap { key in subjects.first { $0.key == key } }
+        return Settings(dataRoot: dataRoot, logLevel: level, subjects: subjects, selectedSubject: selected)
+    }
+}
+```
+Delete `Sources/HealthBridgeConfig/Placeholder.swift`.
+
+- [ ] **Step 5: Run to verify pass** — Run: `swift test --filter HealthBridgeConfigTests`. Expected: all PASS.
+
+- [ ] **Step 6: Commit**
+```
+git add Package.swift Sources/HealthBridgeConfig Tests/HealthBridgeConfigTests
+git rm Sources/HealthBridgeConfig/Placeholder.swift
+github-agent-commit "feat(config): TOML config, layered settings, ConfigWriter"
+```
+
+---
+
+## Task 3: Bridge Document schema + subject binding + deterministic JSON
+
+**Files:**
+- Create: `Sources/BridgeKit/BridgeDocument.swift`, `Sources/BridgeKit/Observation.swift`, `Sources/BridgeKit/HealthKitMapping.swift`, `Sources/BridgeKit/BridgeJSON.swift`
+- Delete: `Sources/BridgeKit/BridgeKit.swift`
 - Test: `Tests/BridgeKitTests/BridgeDocumentCodingTests.swift`
 
 **Interfaces:**
-- Consumes: nothing.
-- Produces:
-  - `struct BridgeDocument` with `schemaVersion: Int, source: Source, subject: Subject?, observations: [Observation]`.
-  - `struct Source { var kind: SourceKind; var fileName: String; var sha256: String; var extractedAt: Date; var extractor: Extractor }`.
-  - `enum SourceKind: String { case fhir, ccda, pdf }`.
-  - `struct Extractor { var engine: String; var version: String }`.
-  - `struct Subject { var name: String?; var dob: Date? }`.
-  - `struct Observation { var id: String; var code: CodeableRef?; var name: String; var value: ObservationValue; var unit: String?; var effectiveDate: Date; var category: ObservationCategory; var mapping: HealthKitMapping?; var confidence: Double; var sourceLocator: SourceLocator? }`.
-  - `enum ObservationValue: Equatable { case quantity(Double); case string(String) }` with custom `Codable` encoding `{ "type": "quantity"|"string", "value": ... }`.
-  - `enum ObservationCategory: String { case vital, lab, other }`.
-  - `struct CodeableRef { var system: String; var code: String; var display: String }`.
-  - `struct SourceLocator { var page: Int?; var snippet: String? }`.
-  - `struct HealthKitMapping { var quantityType: String; var canonicalUnit: String; var convertedValue: Double }`.
-  - `enum BridgeJSON { static let encoder: JSONEncoder; static let decoder: JSONDecoder }`.
+- `struct SubjectRef: Codable, Equatable, Sendable { var id; var label; var hash; var name: String?; var dob: String? }`.
+- `BridgeDocument { schemaVersion: Int; source: Source; subject: SubjectRef; observations: [Observation] }`; `Source { kind; fileName; sha256; extractedAt: Date; extractor }`; `SourceKind { fhir, ccda, pdf }`; `Extractor { engine, version }`.
+- `Observation { id; code: CodeableRef?; name; value: ObservationValue; unit: String?; effectiveDate: Date; category; mapping: HealthKitMapping?; confidence: Double; sourceLocator: SourceLocator? }`.
+- `enum ObservationValue { case quantity(Double); case string(String) }` (tagged Codable); `ObservationCategory { vital, lab, other }`; `CodeableRef { system, code, display }`; `SourceLocator { page: Int?; snippet: String? }`; `HealthKitMapping { quantityType, canonicalUnit, convertedValue }`; `enum BridgeJSON { static let encoder; decoder }`.
 
-- [ ] **Step 1: Write failing coding test**
-
-`Tests/BridgeKitTests/BridgeDocumentCodingTests.swift`:
+- [ ] **Step 1: Write failing coding test** — `Tests/BridgeKitTests/BridgeDocumentCodingTests.swift`:
 ```swift
 import XCTest
 @testable import BridgeKit
@@ -210,59 +428,40 @@ final class BridgeDocumentCodingTests: XCTestCase {
         let obs = Observation(
             id: "abc123",
             code: CodeableRef(system: "http://loinc.org", code: "29463-7", display: "Body weight"),
-            name: "Body weight",
-            value: .quantity(72.5),
-            unit: "kg",
-            effectiveDate: Date(timeIntervalSince1970: 1_700_000_000),
-            category: .vital,
+            name: "Body weight", value: .quantity(72.5), unit: "kg",
+            effectiveDate: Date(timeIntervalSince1970: 1_700_000_000), category: .vital,
             mapping: HealthKitMapping(quantityType: "HKQuantityTypeIdentifierBodyMass",
                                       canonicalUnit: "kg", convertedValue: 72.5),
-            confidence: 1.0,
-            sourceLocator: nil
-        )
+            confidence: 1.0, sourceLocator: nil)
         return BridgeDocument(
             schemaVersion: 1,
             source: Source(kind: .fhir, fileName: "x.json", sha256: "deadbeef",
                            extractedAt: Date(timeIntervalSince1970: 1_700_000_000),
                            extractor: Extractor(engine: "fhir-parser", version: "0.1.0")),
-            subject: nil,
-            observations: [obs]
-        )
+            subject: SubjectRef(id: "uuid-1", label: "Jane", hash: "abcd",
+                                name: "Jane Public", dob: "2000-01-01"),
+            observations: [obs])
     }
-
     func testRoundTrip() throws {
         let original = sampleDocument()
-        let data = try BridgeJSON.encoder.encode(original)
-        let decoded = try BridgeJSON.decoder.decode(BridgeDocument.self, from: data)
+        let decoded = try BridgeJSON.decoder.decode(BridgeDocument.self, from: BridgeJSON.encoder.encode(original))
         XCTAssertEqual(original, decoded)
     }
-
     func testObservationValueEncodesTagged() throws {
-        let data = try BridgeJSON.encoder.encode(ObservationValue.quantity(72.5))
-        let json = String(decoding: data, as: UTF8.self)
+        let json = String(decoding: try BridgeJSON.encoder.encode(ObservationValue.quantity(72.5)), as: UTF8.self)
         XCTAssertTrue(json.contains("\"type\" : \"quantity\""))
         XCTAssertTrue(json.contains("\"value\" : 72.5"))
     }
-
     func testDeterministicSortedKeys() throws {
-        let data = try BridgeJSON.encoder.encode(sampleDocument())
-        let json = String(decoding: data, as: UTF8.self)
-        // sortedKeys: "category" must appear before "confidence" within an observation
-        let cat = json.range(of: "\"category\"")!
-        let conf = json.range(of: "\"confidence\"")!
-        XCTAssertTrue(cat.lowerBound < conf.lowerBound)
+        let json = String(decoding: try BridgeJSON.encoder.encode(sampleDocument()), as: UTF8.self)
+        XCTAssertTrue(json.range(of: "\"category\"")!.lowerBound < json.range(of: "\"confidence\"")!.lowerBound)
     }
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Run to verify it fails** — Run: `swift test --filter BridgeDocumentCodingTests`. Expected: FAIL.
 
-Run: `swift test --filter BridgeDocumentCodingTests`
-Expected: FAIL — types `BridgeDocument`, `Observation`, `BridgeJSON`, etc. not defined.
-
-- [ ] **Step 3: Implement the schema types**
-
-`Sources/BridgeKit/HealthKitMapping.swift`:
+- [ ] **Step 3: Implement** — `Sources/BridgeKit/HealthKitMapping.swift`:
 ```swift
 import Foundation
 
@@ -270,44 +469,32 @@ public struct HealthKitMapping: Codable, Equatable, Sendable {
     public var quantityType: String
     public var canonicalUnit: String
     public var convertedValue: Double
-
     public init(quantityType: String, canonicalUnit: String, convertedValue: Double) {
-        self.quantityType = quantityType
-        self.canonicalUnit = canonicalUnit
-        self.convertedValue = convertedValue
+        self.quantityType = quantityType; self.canonicalUnit = canonicalUnit; self.convertedValue = convertedValue
     }
 }
 ```
-
 `Sources/BridgeKit/Observation.swift`:
 ```swift
 import Foundation
 
 public struct CodeableRef: Codable, Equatable, Sendable {
-    public var system: String
-    public var code: String
-    public var display: String
+    public var system: String; public var code: String; public var display: String
     public init(system: String, code: String, display: String) {
         self.system = system; self.code = code; self.display = display
     }
 }
 
-public enum ObservationCategory: String, Codable, Sendable {
-    case vital, lab, other
-}
+public enum ObservationCategory: String, Codable, Sendable { case vital, lab, other }
 
 public struct SourceLocator: Codable, Equatable, Sendable {
-    public var page: Int?
-    public var snippet: String?
-    public init(page: Int? = nil, snippet: String? = nil) {
-        self.page = page; self.snippet = snippet
-    }
+    public var page: Int?; public var snippet: String?
+    public init(page: Int? = nil, snippet: String? = nil) { self.page = page; self.snippet = snippet }
 }
 
 public enum ObservationValue: Equatable, Sendable {
     case quantity(Double)
     case string(String)
-
     private enum Kind: String, Codable { case quantity, string }
     private enum CodingKeys: String, CodingKey { case type, value }
 }
@@ -323,12 +510,8 @@ extension ObservationValue: Codable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .quantity(let d):
-            try c.encode(Kind.quantity, forKey: .type)
-            try c.encode(d, forKey: .value)
-        case .string(let s):
-            try c.encode(Kind.string, forKey: .type)
-            try c.encode(s, forKey: .value)
+        case .quantity(let d): try c.encode(Kind.quantity, forKey: .type); try c.encode(d, forKey: .value)
+        case .string(let s):   try c.encode(Kind.string, forKey: .type);   try c.encode(s, forKey: .value)
         }
     }
 }
@@ -344,17 +527,15 @@ public struct Observation: Codable, Equatable, Sendable {
     public var mapping: HealthKitMapping?
     public var confidence: Double
     public var sourceLocator: SourceLocator?
-
-    public init(id: String, code: CodeableRef?, name: String, value: ObservationValue,
-                unit: String?, effectiveDate: Date, category: ObservationCategory,
-                mapping: HealthKitMapping?, confidence: Double, sourceLocator: SourceLocator?) {
-        self.id = id; self.code = code; self.name = name; self.value = value
-        self.unit = unit; self.effectiveDate = effectiveDate; self.category = category
-        self.mapping = mapping; self.confidence = confidence; self.sourceLocator = sourceLocator
+    public init(id: String, code: CodeableRef?, name: String, value: ObservationValue, unit: String?,
+                effectiveDate: Date, category: ObservationCategory, mapping: HealthKitMapping?,
+                confidence: Double, sourceLocator: SourceLocator?) {
+        self.id = id; self.code = code; self.name = name; self.value = value; self.unit = unit
+        self.effectiveDate = effectiveDate; self.category = category; self.mapping = mapping
+        self.confidence = confidence; self.sourceLocator = sourceLocator
     }
 }
 ```
-
 `Sources/BridgeKit/BridgeDocument.swift`:
 ```swift
 import Foundation
@@ -362,42 +543,42 @@ import Foundation
 public enum SourceKind: String, Codable, Sendable { case fhir, ccda, pdf }
 
 public struct Extractor: Codable, Equatable, Sendable {
-    public var engine: String
-    public var version: String
+    public var engine: String; public var version: String
     public init(engine: String, version: String) { self.engine = engine; self.version = version }
 }
 
 public struct Source: Codable, Equatable, Sendable {
-    public var kind: SourceKind
-    public var fileName: String
-    public var sha256: String
-    public var extractedAt: Date
-    public var extractor: Extractor
+    public var kind: SourceKind; public var fileName: String; public var sha256: String
+    public var extractedAt: Date; public var extractor: Extractor
     public init(kind: SourceKind, fileName: String, sha256: String, extractedAt: Date, extractor: Extractor) {
         self.kind = kind; self.fileName = fileName; self.sha256 = sha256
         self.extractedAt = extractedAt; self.extractor = extractor
     }
 }
 
-public struct Subject: Codable, Equatable, Sendable {
+public struct SubjectRef: Codable, Equatable, Sendable {
+    public var id: String       // UUID
+    public var label: String
+    public var hash: String     // sha256(name|dob)
     public var name: String?
-    public var dob: Date?
-    public init(name: String? = nil, dob: Date? = nil) { self.name = name; self.dob = dob }
+    public var dob: String?
+    public init(id: String, label: String, hash: String, name: String? = nil, dob: String? = nil) {
+        self.id = id; self.label = label; self.hash = hash; self.name = name; self.dob = dob
+    }
 }
 
 public struct BridgeDocument: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 1
     public var schemaVersion: Int
     public var source: Source
-    public var subject: Subject?
+    public var subject: SubjectRef
     public var observations: [Observation]
-    public init(schemaVersion: Int, source: Source, subject: Subject?, observations: [Observation]) {
+    public init(schemaVersion: Int, source: Source, subject: SubjectRef, observations: [Observation]) {
         self.schemaVersion = schemaVersion; self.source = source
         self.subject = subject; self.observations = observations
     }
 }
 ```
-
 `Sources/BridgeKit/BridgeJSON.swift`:
 ```swift
 import Foundation
@@ -409,7 +590,6 @@ public enum BridgeJSON {
         e.dateEncodingStrategy = .iso8601
         return e
     }()
-
     public static let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
@@ -417,128 +597,129 @@ public enum BridgeJSON {
     }()
 }
 ```
+Delete `Sources/BridgeKit/BridgeKit.swift`.
 
-Then delete the placeholder: `rm Sources/BridgeKit/BridgeKit.swift`.
-
-- [ ] **Step 4: Run to verify pass**
-
-Run: `swift test --filter BridgeDocumentCodingTests`
-Expected: all three tests PASS.
+- [ ] **Step 4: Run to verify pass** — Run: `swift test --filter BridgeDocumentCodingTests`. Expected: all PASS.
 
 - [ ] **Step 5: Commit**
-
 ```
 git add Sources/BridgeKit Tests/BridgeKitTests/BridgeDocumentCodingTests.swift
-git commit -m "feat(bridgekit): Bridge Document schema with deterministic JSON encoding"
+github-agent-commit "feat(bridgekit): schema with subject binding and deterministic JSON"
 ```
 
 ---
 
-## Task 3: Stable observation ID derivation
+## Task 4: Content-based observation ID + subject hash
 
 **Files:**
-- Create: `Sources/BridgeKit/ObservationID.swift`
-- Test: `Tests/BridgeKitTests/ObservationIDTests.swift`
+- Create: `Sources/BridgeKit/ObservationID.swift`, `Sources/BridgeKit/SubjectHash.swift`
+- Test: `Tests/BridgeKitTests/ObservationIDTests.swift`, `Tests/BridgeKitTests/SubjectHashTests.swift`
 
 **Interfaces:**
-- Consumes: nothing.
-- Produces: `enum ObservationID { static func derive(documentKey: String, system: String?, code: String?, effectiveDate: Date, rawValue: String, unit: String?) -> String }` — returns a lowercase hex SHA-256 string. `documentKey` is the source `sha256` (or a stable patient+doc key). `rawValue` is the observation value rendered as a stable string (e.g. `"72.5"` or the qualitative string).
+- `enum ObservationID { static func derive(subjectId: String, system: String?, code: String?, effectiveDate: Date, rawValue: String, unit: String?) -> String }` — lowercase hex SHA-256 of `subjectId + system + code + effectiveDate(rounded sec) + rawValue + unit`. **Content-based, no `documentKey`**: the same clinical observation gets the same id across files (stable iOS sync identifier); a different subject yields a different id.
+- `enum SubjectHash { static func make(name: String, dob: String) -> String }` — `sha256` of canonicalized `name.lowercased().trimmed|dob.trimmed`.
 
-- [ ] **Step 1: Write failing test**
-
-`Tests/BridgeKitTests/ObservationIDTests.swift`:
+- [ ] **Step 1: Write failing tests** — `Tests/BridgeKitTests/ObservationIDTests.swift`:
 ```swift
 import XCTest
 @testable import BridgeKit
 
 final class ObservationIDTests: XCTestCase {
     private let date = Date(timeIntervalSince1970: 1_700_000_000)
-
     func testDeterministic() {
-        let a = ObservationID.derive(documentKey: "doc1", system: "http://loinc.org",
-                                     code: "29463-7", effectiveDate: date, rawValue: "72.5", unit: "kg")
-        let b = ObservationID.derive(documentKey: "doc1", system: "http://loinc.org",
-                                     code: "29463-7", effectiveDate: date, rawValue: "72.5", unit: "kg")
-        XCTAssertEqual(a, b)
-        XCTAssertEqual(a.count, 64) // SHA-256 hex
+        let a = ObservationID.derive(subjectId: "s", system: "http://loinc.org", code: "29463-7",
+                                     effectiveDate: date, rawValue: "72.5", unit: "kg")
+        let b = ObservationID.derive(subjectId: "s", system: "http://loinc.org", code: "29463-7",
+                                     effectiveDate: date, rawValue: "72.5", unit: "kg")
+        XCTAssertEqual(a, b); XCTAssertEqual(a.count, 64)
     }
-
     func testValueChangesID() {
-        let a = ObservationID.derive(documentKey: "doc1", system: "http://loinc.org",
-                                     code: "29463-7", effectiveDate: date, rawValue: "72.5", unit: "kg")
-        let b = ObservationID.derive(documentKey: "doc1", system: "http://loinc.org",
-                                     code: "29463-7", effectiveDate: date, rawValue: "73.0", unit: "kg")
+        let a = ObservationID.derive(subjectId: "s", system: nil, code: nil, effectiveDate: date, rawValue: "72.5", unit: "kg")
+        let b = ObservationID.derive(subjectId: "s", system: nil, code: nil, effectiveDate: date, rawValue: "73.0", unit: "kg")
         XCTAssertNotEqual(a, b)
     }
-
-    func testDocumentKeyChangesID() {
-        let a = ObservationID.derive(documentKey: "doc1", system: nil, code: nil,
-                                     effectiveDate: date, rawValue: "positive", unit: nil)
-        let b = ObservationID.derive(documentKey: "doc2", system: nil, code: nil,
-                                     effectiveDate: date, rawValue: "positive", unit: nil)
+    func testSubjectChangesID() {
+        let a = ObservationID.derive(subjectId: "s1", system: nil, code: nil, effectiveDate: date, rawValue: "x", unit: nil)
+        let b = ObservationID.derive(subjectId: "s2", system: nil, code: nil, effectiveDate: date, rawValue: "x", unit: nil)
         XCTAssertNotEqual(a, b)
+    }
+    func testSameContentSameSubjectSameID() {
+        // Cross-file: identical clinical content for the same subject -> identical id (no documentKey).
+        let a = ObservationID.derive(subjectId: "s", system: "http://loinc.org", code: "29463-7",
+                                     effectiveDate: date, rawValue: "72.5", unit: "kg")
+        let b = ObservationID.derive(subjectId: "s", system: "http://loinc.org", code: "29463-7",
+                                     effectiveDate: date, rawValue: "72.5", unit: "kg")
+        XCTAssertEqual(a, b)
+    }
+}
+```
+`Tests/BridgeKitTests/SubjectHashTests.swift`:
+```swift
+import XCTest
+@testable import BridgeKit
+
+final class SubjectHashTests: XCTestCase {
+    func testDeterministicAndCanonical() {
+        XCTAssertEqual(SubjectHash.make(name: "Jane Public", dob: "2000-01-01"),
+                       SubjectHash.make(name: "  jane public ", dob: "2000-01-01"))
+    }
+    func testDifferentPeopleDiffer() {
+        XCTAssertNotEqual(SubjectHash.make(name: "Jane Public", dob: "2000-01-01"),
+                          SubjectHash.make(name: "John Sample", dob: "1980-06-15"))
     }
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Run to verify it fails** — Run: `swift test --filter "ObservationIDTests|SubjectHashTests"`. Expected: FAIL.
 
-Run: `swift test --filter ObservationIDTests`
-Expected: FAIL — `ObservationID` not defined.
-
-- [ ] **Step 3: Implement**
-
-`Sources/BridgeKit/ObservationID.swift`:
+- [ ] **Step 3: Implement** — `Sources/BridgeKit/ObservationID.swift`:
 ```swift
 import Foundation
 import CryptoKit
 
 public enum ObservationID {
-    public static func derive(documentKey: String, system: String?, code: String?,
+    public static func derive(subjectId: String, system: String?, code: String?,
                               effectiveDate: Date, rawValue: String, unit: String?) -> String {
-        // Stable, unambiguous field separator avoids collisions between adjacent fields.
-        let parts = [
-            documentKey,
-            system ?? "",
-            code ?? "",
-            String(Int(effectiveDate.timeIntervalSince1970.rounded())),
-            rawValue,
-            unit ?? "",
-        ]
-        let joined = parts.joined(separator: "\u{1f}") // ASCII Unit Separator
-        let digest = SHA256.hash(data: Data(joined.utf8))
+        let parts = [subjectId, system ?? "", code ?? "",
+                     String(Int(effectiveDate.timeIntervalSince1970.rounded())), rawValue, unit ?? ""]
+        let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{1f}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 }
 ```
+`Sources/BridgeKit/SubjectHash.swift`:
+```swift
+import Foundation
+import CryptoKit
 
-- [ ] **Step 4: Run to verify pass**
+public enum SubjectHash {
+    public static func make(name: String, dob: String) -> String {
+        let canonical = "\(name.lowercased().trimmingCharacters(in: .whitespaces))|\(dob.trimmingCharacters(in: .whitespaces))"
+        return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
+```
 
-Run: `swift test --filter ObservationIDTests`
-Expected: all three PASS.
+- [ ] **Step 4: Run to verify pass** — Run: `swift test --filter "ObservationIDTests|SubjectHashTests"`. Expected: PASS.
 
 - [ ] **Step 5: Commit**
-
 ```
-git add Sources/BridgeKit/ObservationID.swift Tests/BridgeKitTests/ObservationIDTests.swift
-git commit -m "feat(bridgekit): deterministic SHA-256 observation ID derivation"
+git add Sources/BridgeKit/ObservationID.swift Sources/BridgeKit/SubjectHash.swift Tests/BridgeKitTests/ObservationIDTests.swift Tests/BridgeKitTests/SubjectHashTests.swift
+github-agent-commit "feat(bridgekit): content-based observation id and subject hash"
 ```
 
 ---
 
-## Task 4: LOINC→HealthKit mapping table + unit conversion
+## Task 5: LOINC→HealthKit mapping table + unit conversion
 
 **Files:**
 - Create: `Sources/BridgeKit/MappingTable.swift`
 - Test: `Tests/BridgeKitTests/MappingTableTests.swift`
 
 **Interfaces:**
-- Consumes: `Observation`, `HealthKitMapping`, `ObservationValue` from Task 2.
-- Produces: `enum MappingTable { static func resolve(loinc: String?, value: ObservationValue, unit: String?) -> HealthKitMapping? }`. Returns `nil` when the LOINC code is unknown, the value is not a `.quantity`, or the unit cannot be converted to the entry's canonical unit.
+- `enum MappingTable { static func resolve(loinc: String?, value: ObservationValue, unit: String?) -> HealthKitMapping? }` — `nil` when LOINC unknown, value not `.quantity`, or unit unconvertible. Seed **lean 10**; converters accept common UCUM spelling variants.
 
-- [ ] **Step 1: Write failing test**
-
-`Tests/BridgeKitTests/MappingTableTests.swift`:
+- [ ] **Step 1: Write failing test** — `Tests/BridgeKitTests/MappingTableTests.swift`:
 ```swift
 import XCTest
 @testable import BridgeKit
@@ -547,50 +728,44 @@ final class MappingTableTests: XCTestCase {
     func testMapsBodyWeightKilograms() {
         let m = MappingTable.resolve(loinc: "29463-7", value: .quantity(72.5), unit: "kg")
         XCTAssertEqual(m?.quantityType, "HKQuantityTypeIdentifierBodyMass")
-        XCTAssertEqual(m?.canonicalUnit, "kg")
         XCTAssertEqual(m?.convertedValue ?? 0, 72.5, accuracy: 0.0001)
     }
-
     func testConvertsPoundsToKilograms() {
         let m = MappingTable.resolve(loinc: "29463-7", value: .quantity(160), unit: "[lb_av]")
-        XCTAssertEqual(m?.canonicalUnit, "kg")
         XCTAssertEqual(m?.convertedValue ?? 0, 72.5747, accuracy: 0.01)
     }
-
     func testConvertsFahrenheitToCelsius() {
         let m = MappingTable.resolve(loinc: "8310-5", value: .quantity(98.6), unit: "[degF]")
         XCTAssertEqual(m?.quantityType, "HKQuantityTypeIdentifierBodyTemperature")
-        XCTAssertEqual(m?.canonicalUnit, "degC")
         XCTAssertEqual(m?.convertedValue ?? 0, 37.0, accuracy: 0.05)
     }
-
-    func testUnknownLoincReturnsNil() {
-        XCTAssertNil(MappingTable.resolve(loinc: "1234-5", value: .quantity(1), unit: "g"))
+    func testBMIUnitVariants() {
+        XCTAssertNotNil(MappingTable.resolve(loinc: "39156-5", value: .quantity(22), unit: "kg/m2"))
+        XCTAssertNotNil(MappingTable.resolve(loinc: "39156-5", value: .quantity(22), unit: "kg/m^2"))
     }
-
-    func testNonQuantityReturnsNil() {
-        XCTAssertNil(MappingTable.resolve(loinc: "29463-7", value: .string("positive"), unit: nil))
+    func testOxygenPercentVariants() {
+        XCTAssertNotNil(MappingTable.resolve(loinc: "2708-6", value: .quantity(98), unit: "%"))
+        XCTAssertNotNil(MappingTable.resolve(loinc: "2708-6", value: .quantity(98), unit: "{percent}"))
     }
-
-    func testUnconvertibleUnitReturnsNil() {
-        XCTAssertNil(MappingTable.resolve(loinc: "29463-7", value: .quantity(1), unit: "banana"))
+    func testGlucoseUnits() {
+        XCTAssertEqual(MappingTable.resolve(loinc: "2339-0", value: .quantity(5), unit: "mmol/L")?.convertedValue ?? 0, 90.09, accuracy: 0.5)
+        XCTAssertNotNil(MappingTable.resolve(loinc: "2339-0", value: .quantity(90), unit: "mg/dl"))
     }
+    func testTemperatureCelVariant() {
+        XCTAssertEqual(MappingTable.resolve(loinc: "8310-5", value: .quantity(37), unit: "Cel")?.convertedValue ?? 0, 37, accuracy: 0.01)
+    }
+    func testUnknownLoincReturnsNil() { XCTAssertNil(MappingTable.resolve(loinc: "1234-5", value: .quantity(1), unit: "g")) }
+    func testNonQuantityReturnsNil() { XCTAssertNil(MappingTable.resolve(loinc: "29463-7", value: .string("x"), unit: nil)) }
+    func testUnconvertibleUnitReturnsNil() { XCTAssertNil(MappingTable.resolve(loinc: "29463-7", value: .quantity(1), unit: "banana")) }
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Run to verify it fails** — Run: `swift test --filter MappingTableTests`. Expected: FAIL.
 
-Run: `swift test --filter MappingTableTests`
-Expected: FAIL — `MappingTable` not defined.
-
-- [ ] **Step 3: Implement**
-
-`Sources/BridgeKit/MappingTable.swift`:
+- [ ] **Step 3: Implement** — `Sources/BridgeKit/MappingTable.swift`:
 ```swift
 import Foundation
 
-/// One row of the LOINC -> HealthKit mapping. `convert` turns a source value in
-/// `sourceUnit` into the canonical unit, returning nil when the unit is unsupported.
 struct MappingEntry {
     let loinc: String
     let quantityType: String
@@ -599,171 +774,114 @@ struct MappingEntry {
 }
 
 public enum MappingTable {
-
     public static func resolve(loinc: String?, value: ObservationValue, unit: String?) -> HealthKitMapping? {
-        guard let loinc, case .quantity(let raw) = value, let entry = table[loinc] else { return nil }
-        guard let converted = entry.convert(raw, unit) else { return nil }
-        return HealthKitMapping(quantityType: entry.quantityType,
-                                canonicalUnit: entry.canonicalUnit,
-                                convertedValue: converted)
+        guard let loinc, case .quantity(let raw) = value, let entry = table[loinc],
+              let converted = entry.convert(raw, unit) else { return nil }
+        return HealthKitMapping(quantityType: entry.quantityType, canonicalUnit: entry.canonicalUnit, convertedValue: converted)
     }
 
-    // MARK: - Unit converters (UCUM source units -> canonical unit)
-
-    /// Identity converter accepting a set of synonym units (all already canonical).
-    private static func passthrough(_ accepted: Set<String>) -> (Double, String?) -> Double? {
-        { v, u in (u == nil || accepted.contains(u!)) ? v : nil }
+    private static func passthrough(_ ok: Set<String>) -> (Double, String?) -> Double? {
+        { v, u in (u == nil || ok.contains(u!)) ? v : nil }
     }
-
     private static let mass: (Double, String?) -> Double? = { v, u in
-        switch u {
-        case "kg", nil: return v
-        case "g":       return v / 1000.0
-        case "[lb_av]", "lb": return v * 0.45359237
-        default: return nil
-        }
-    }
-
+        switch u { case "kg", nil: return v; case "g": return v/1000; case "[lb_av]", "lb": return v*0.45359237; default: return nil } }
     private static let length: (Double, String?) -> Double? = { v, u in
-        switch u {
-        case "cm", nil: return v
-        case "m":       return v * 100.0
-        case "[in_i]", "in": return v * 2.54
-        default: return nil
-        }
-    }
-
+        switch u { case "cm", nil: return v; case "m": return v*100; case "[in_i]", "in": return v*2.54; default: return nil } }
     private static let temperature: (Double, String?) -> Double? = { v, u in
-        switch u {
-        case "Cel", "degC", nil: return v
-        case "[degF]", "degF":   return (v - 32.0) * 5.0 / 9.0
-        default: return nil
-        }
-    }
-
-    // MARK: - The table
+        switch u { case "Cel", "degC", nil: return v; case "[degF]", "degF": return (v-32)*5/9; default: return nil } }
+    private static let glucose: (Double, String?) -> Double? = { v, u in
+        switch u { case "mg/dL", "mg/dl", nil: return v; case "mmol/L", "mmol/l": return v*18.0182; default: return nil } }
 
     private static let table: [String: MappingEntry] = {
-        let entries: [MappingEntry] = [
-            MappingEntry(loinc: "29463-7", quantityType: "HKQuantityTypeIdentifierBodyMass",
-                         canonicalUnit: "kg", convert: mass),
-            MappingEntry(loinc: "8302-2", quantityType: "HKQuantityTypeIdentifierHeight",
-                         canonicalUnit: "cm", convert: length),
-            MappingEntry(loinc: "8310-5", quantityType: "HKQuantityTypeIdentifierBodyTemperature",
-                         canonicalUnit: "degC", convert: temperature),
-            MappingEntry(loinc: "39156-5", quantityType: "HKQuantityTypeIdentifierBodyMassIndex",
-                         canonicalUnit: "kg/m2", convert: passthrough(["kg/m2"])),
-            MappingEntry(loinc: "8867-4", quantityType: "HKQuantityTypeIdentifierHeartRate",
-                         canonicalUnit: "count/min", convert: passthrough(["/min", "count/min", "{beats}/min"])),
-            MappingEntry(loinc: "9279-1", quantityType: "HKQuantityTypeIdentifierRespiratoryRate",
-                         canonicalUnit: "count/min", convert: passthrough(["/min", "count/min", "{breaths}/min"])),
-            MappingEntry(loinc: "2708-6", quantityType: "HKQuantityTypeIdentifierOxygenSaturation",
-                         canonicalUnit: "%", convert: passthrough(["%"])),
-            MappingEntry(loinc: "8480-6", quantityType: "HKQuantityTypeIdentifierBloodPressureSystolic",
-                         canonicalUnit: "mmHg", convert: passthrough(["mm[Hg]", "mmHg"])),
-            MappingEntry(loinc: "8462-4", quantityType: "HKQuantityTypeIdentifierBloodPressureDiastolic",
-                         canonicalUnit: "mmHg", convert: passthrough(["mm[Hg]", "mmHg"])),
-            MappingEntry(loinc: "2339-0", quantityType: "HKQuantityTypeIdentifierBloodGlucose",
-                         canonicalUnit: "mg/dL", convert: { v, u in
-                             switch u {
-                             case "mg/dL", "mg/dl", nil: return v
-                             case "mmol/L", "mmol/l":   return v * 18.0182
-                             default: return nil
-                             }
-                         }),
+        let e: [MappingEntry] = [
+            MappingEntry(loinc: "29463-7", quantityType: "HKQuantityTypeIdentifierBodyMass", canonicalUnit: "kg", convert: mass),
+            MappingEntry(loinc: "8302-2",  quantityType: "HKQuantityTypeIdentifierHeight", canonicalUnit: "cm", convert: length),
+            MappingEntry(loinc: "8310-5",  quantityType: "HKQuantityTypeIdentifierBodyTemperature", canonicalUnit: "degC", convert: temperature),
+            MappingEntry(loinc: "39156-5", quantityType: "HKQuantityTypeIdentifierBodyMassIndex", canonicalUnit: "kg/m2", convert: passthrough(["kg/m2", "kg/m^2"])),
+            MappingEntry(loinc: "8867-4",  quantityType: "HKQuantityTypeIdentifierHeartRate", canonicalUnit: "count/min", convert: passthrough(["/min","count/min","{beats}/min"])),
+            MappingEntry(loinc: "9279-1",  quantityType: "HKQuantityTypeIdentifierRespiratoryRate", canonicalUnit: "count/min", convert: passthrough(["/min","count/min","{breaths}/min"])),
+            MappingEntry(loinc: "2708-6",  quantityType: "HKQuantityTypeIdentifierOxygenSaturation", canonicalUnit: "%", convert: passthrough(["%","{percent}"])),
+            MappingEntry(loinc: "8480-6",  quantityType: "HKQuantityTypeIdentifierBloodPressureSystolic", canonicalUnit: "mmHg", convert: passthrough(["mm[Hg]","mmHg"])),
+            MappingEntry(loinc: "8462-4",  quantityType: "HKQuantityTypeIdentifierBloodPressureDiastolic", canonicalUnit: "mmHg", convert: passthrough(["mm[Hg]","mmHg"])),
+            MappingEntry(loinc: "2339-0",  quantityType: "HKQuantityTypeIdentifierBloodGlucose", canonicalUnit: "mg/dL", convert: glucose),
         ]
-        return Dictionary(uniqueKeysWithValues: entries.map { ($0.loinc, $0) })
+        return Dictionary(uniqueKeysWithValues: e.map { ($0.loinc, $0) })
     }()
 }
 ```
 
-- [ ] **Step 4: Run to verify pass**
-
-Run: `swift test --filter MappingTableTests`
-Expected: all six PASS.
+- [ ] **Step 4: Run to verify pass** — Run: `swift test --filter MappingTableTests`. Expected: PASS.
 
 - [ ] **Step 5: Commit**
-
 ```
 git add Sources/BridgeKit/MappingTable.swift Tests/BridgeKitTests/MappingTableTests.swift
-git commit -m "feat(bridgekit): LOINC to HealthKit mapping table with unit conversion"
+github-agent-commit "feat(bridgekit): LOINC to HealthKit mapping with unit conversion"
 ```
 
 ---
 
-## Task 5: Bridge Document validation
+## Task 6: Bridge Document validation
 
 **Files:**
 - Create: `Sources/BridgeKit/Validation.swift`
 - Test: `Tests/BridgeKitTests/ValidationTests.swift`
 
 **Interfaces:**
-- Consumes: `BridgeDocument`, `Observation` from Task 2.
-- Produces: `struct ValidationIssue { let severity: Severity; let message: String }` with `enum Severity { case error, warning }`, and `func validate(_ document: BridgeDocument) -> [ValidationIssue]` (free function in `BridgeKit`). Rules: schemaVersion must equal current → error; empty `source.sha256` → error; duplicate observation ids → error; any observation with `confidence` outside `0...1` → error; an observation whose `mapping != nil` but `value` is `.string` → error; zero observations → warning.
+- `struct ValidationIssue { enum Severity { case error, warning }; let severity; let message }`, `func validate(_:) -> [ValidationIssue]`. Errors: wrong `schemaVersion`; `source.sha256` not 64 hex chars; empty `subject.id`; `subject.id` not a valid UUID; empty `subject.hash`; duplicate observation ids (backstop — builder dedupes first); empty observation id or name; `confidence` outside `0...1`; non-finite quantity value; `mapping != nil` on a `.string` value; non-finite `mapping.convertedValue`; empty `mapping.quantityType`/`canonicalUnit`. Warning: zero observations.
 
-- [ ] **Step 1: Write failing test**
-
-`Tests/BridgeKitTests/ValidationTests.swift`:
+- [ ] **Step 1: Write failing test** — `Tests/BridgeKitTests/ValidationTests.swift`:
 ```swift
 import XCTest
 @testable import BridgeKit
 
 final class ValidationTests: XCTestCase {
-    private func makeDoc(observations: [Observation], schemaVersion: Int = 1,
-                         sha256: String = "abc") -> BridgeDocument {
-        BridgeDocument(
-            schemaVersion: schemaVersion,
-            source: Source(kind: .fhir, fileName: "f.json", sha256: sha256,
-                           extractedAt: Date(timeIntervalSince1970: 0),
-                           extractor: Extractor(engine: "fhir-parser", version: "0.1.0")),
-            subject: nil, observations: observations)
-    }
+    private let goodSha = String(repeating: "a", count: 64)
+    private let goodUUID = "11111111-1111-1111-1111-111111111111"
 
-    private func obs(id: String, value: ObservationValue = .quantity(1),
+    private func doc(_ obs: [Observation], schemaVersion: Int = 1, sha: String? = nil,
+                     subjectId: String? = nil, hash: String = "h") -> BridgeDocument {
+        BridgeDocument(schemaVersion: schemaVersion,
+            source: Source(kind: .fhir, fileName: "f.json", sha256: sha ?? goodSha,
+                           extractedAt: Date(timeIntervalSince1970: 0), extractor: Extractor(engine: "x", version: "1")),
+            subject: SubjectRef(id: subjectId ?? goodUUID, label: "L", hash: hash), observations: obs)
+    }
+    private func obs(_ id: String = "a", name: String = "x", value: ObservationValue = .quantity(1),
                      mapping: HealthKitMapping? = nil, confidence: Double = 1.0) -> Observation {
-        Observation(id: id, code: nil, name: "x", value: value, unit: "kg",
+        Observation(id: id, code: nil, name: name, value: value, unit: "kg",
                     effectiveDate: Date(timeIntervalSince1970: 0), category: .vital,
                     mapping: mapping, confidence: confidence, sourceLocator: nil)
     }
+    private func errors(_ d: BridgeDocument) -> Bool { validate(d).contains { $0.severity == .error } }
 
-    func testValidDocumentHasNoErrors() {
-        let issues = validate(makeDoc(observations: [obs(id: "a")]))
-        XCTAssertFalse(issues.contains { $0.severity == .error })
+    func testValid() { XCTAssertFalse(errors(doc([obs()]))) }
+    func testWrongSchema() { XCTAssertTrue(errors(doc([obs()], schemaVersion: 99))) }
+    func testBadShaLength() { XCTAssertTrue(errors(doc([obs()], sha: "abc"))) }
+    func testEmptySubjectId() { XCTAssertTrue(errors(doc([obs()], subjectId: ""))) }
+    func testInvalidSubjectUUID() { XCTAssertTrue(errors(doc([obs()], subjectId: "not-a-uuid"))) }
+    func testEmptySubjectHash() { XCTAssertTrue(errors(doc([obs()], hash: ""))) }
+    func testDuplicateIDs() { XCTAssertTrue(validate(doc([obs("a"), obs("a")])).contains { $0.message.contains("duplicate") }) }
+    func testEmptyObservationName() { XCTAssertTrue(errors(doc([obs(name: "")]))) }
+    func testNonFiniteValue() { XCTAssertTrue(errors(doc([obs(value: .quantity(.nan))]))) }
+    func testMappingOnString() {
+        XCTAssertTrue(errors(doc([obs(value: .string("p"), mapping: HealthKitMapping(quantityType: "X", canonicalUnit: "kg", convertedValue: 1))])))
     }
-
-    func testWrongSchemaVersionIsError() {
-        let issues = validate(makeDoc(observations: [obs(id: "a")], schemaVersion: 99))
-        XCTAssertTrue(issues.contains { $0.severity == .error })
+    func testNonFiniteConverted() {
+        XCTAssertTrue(errors(doc([obs(mapping: HealthKitMapping(quantityType: "X", canonicalUnit: "kg", convertedValue: .infinity))])))
     }
-
-    func testDuplicateIDsAreError() {
-        let issues = validate(makeDoc(observations: [obs(id: "a"), obs(id: "a")]))
-        XCTAssertTrue(issues.contains { $0.severity == .error && $0.message.contains("duplicate") })
+    func testEmptyMappingField() {
+        XCTAssertTrue(errors(doc([obs(mapping: HealthKitMapping(quantityType: "", canonicalUnit: "kg", convertedValue: 1))])))
     }
-
-    func testMappingOnStringValueIsError() {
-        let bad = obs(id: "a", value: .string("positive"),
-                      mapping: HealthKitMapping(quantityType: "X", canonicalUnit: "kg", convertedValue: 1))
-        let issues = validate(makeDoc(observations: [bad]))
-        XCTAssertTrue(issues.contains { $0.severity == .error })
-    }
-
-    func testEmptyObservationsIsWarning() {
-        let issues = validate(makeDoc(observations: []))
+    func testEmptyObservationsWarns() {
+        let issues = validate(doc([]))
         XCTAssertTrue(issues.contains { $0.severity == .warning })
         XCTAssertFalse(issues.contains { $0.severity == .error })
     }
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Run to verify it fails** — Run: `swift test --filter ValidationTests`. Expected: FAIL.
 
-Run: `swift test --filter ValidationTests`
-Expected: FAIL — `validate` / `ValidationIssue` not defined.
-
-- [ ] **Step 3: Implement**
-
-`Sources/BridgeKit/Validation.swift`:
+- [ ] **Step 3: Implement** — `Sources/BridgeKit/Validation.swift`:
 ```swift
 import Foundation
 
@@ -771,83 +889,70 @@ public struct ValidationIssue: Equatable, Sendable {
     public enum Severity: Sendable { case error, warning }
     public let severity: Severity
     public let message: String
-    public init(severity: Severity, message: String) {
-        self.severity = severity; self.message = message
-    }
+    public init(severity: Severity, message: String) { self.severity = severity; self.message = message }
 }
 
 public func validate(_ document: BridgeDocument) -> [ValidationIssue] {
     var issues: [ValidationIssue] = []
+    func err(_ m: String) { issues.append(.init(severity: .error, message: m)) }
 
     if document.schemaVersion != BridgeDocument.currentSchemaVersion {
-        issues.append(.init(severity: .error,
-            message: "schemaVersion \(document.schemaVersion) != \(BridgeDocument.currentSchemaVersion)"))
+        err("schemaVersion \(document.schemaVersion) != \(BridgeDocument.currentSchemaVersion)")
     }
-    if document.source.sha256.isEmpty {
-        issues.append(.init(severity: .error, message: "source.sha256 is empty"))
-    }
-    if document.observations.isEmpty {
-        issues.append(.init(severity: .warning, message: "document has zero observations"))
-    }
+    let sha = document.source.sha256
+    if sha.count != 64 || sha.contains(where: { !$0.isHexDigit }) { err("source.sha256 is not 64 hex chars") }
+    if document.subject.id.isEmpty { err("subject.id is empty") }
+    else if UUID(uuidString: document.subject.id) == nil { err("subject.id is not a valid UUID") }
+    if document.subject.hash.isEmpty { err("subject.hash is empty") }
+    if document.observations.isEmpty { issues.append(.init(severity: .warning, message: "document has zero observations")) }
 
     var seen = Set<String>()
     for o in document.observations {
-        if !seen.insert(o.id).inserted {
-            issues.append(.init(severity: .error, message: "duplicate observation id: \(o.id)"))
-        }
-        if !(0.0...1.0).contains(o.confidence) {
-            issues.append(.init(severity: .error, message: "confidence out of range for \(o.id)"))
-        }
-        if o.mapping != nil, case .string = o.value {
-            issues.append(.init(severity: .error, message: "string-valued observation \(o.id) cannot carry a HealthKit mapping"))
+        if o.id.isEmpty { err("observation has empty id") }
+        if !seen.insert(o.id).inserted { err("duplicate observation id: \(o.id)") }
+        if o.name.isEmpty { err("observation \(o.id) has empty name") }
+        if !(0.0...1.0).contains(o.confidence) { err("confidence out of range for \(o.id)") }
+        if case .quantity(let d) = o.value, !d.isFinite { err("non-finite value for \(o.id)") }
+        if let m = o.mapping {
+            if case .string = o.value { err("string-valued observation \(o.id) cannot carry a HealthKit mapping") }
+            if m.quantityType.isEmpty || m.canonicalUnit.isEmpty { err("empty mapping field for \(o.id)") }
+            if !m.convertedValue.isFinite { err("non-finite mapping.convertedValue for \(o.id)") }
         }
     }
     return issues
 }
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [ ] **Step 4: Run to verify pass** — Run: `swift test --filter ValidationTests`. Then `swift test --filter BridgeKitTests`. Expected: all PASS.
 
-Run: `swift test --filter ValidationTests`
-Expected: all five PASS.
-
-- [ ] **Step 5: Run the full BridgeKit suite**
-
-Run: `swift test --filter BridgeKitTests`
-Expected: every BridgeKit test PASSES.
-
-- [ ] **Step 6: Commit**
-
+- [ ] **Step 5: Commit**
 ```
 git add Sources/BridgeKit/Validation.swift Tests/BridgeKitTests/ValidationTests.swift
-git commit -m "feat(bridgekit): Bridge Document validation rules"
+github-agent-commit "feat(bridgekit): hardened Bridge Document validation"
 ```
 
 ---
 
-## Task 6: DocumentParser protocol
+## Task 7: DocumentParser protocol + ParseResult
 
 **Files:**
-- Modify: `Package.swift` (add the `HealthBridgeParsingTests` target — it does not exist yet)
+- Modify: `Package.swift` (add `HealthBridgeParsingTests` target — no resources yet)
 - Create: `Sources/HealthBridgeParsing/DocumentParser.swift`
 - Delete: `Sources/HealthBridgeParsing/Placeholder.swift`
 - Test: `Tests/HealthBridgeParsingTests/DocumentParserTests.swift`
 
 **Interfaces:**
-- Consumes: `Observation` from `BridgeKit`.
-- Produces:
-  - `protocol DocumentParser { static func canParse(_ data: Data) -> Bool; func parse(_ data: Data, documentKey: String) throws -> [Observation] }`.
-  - `enum ParseError: Error, Equatable { case unrecognizedFormat; case malformed(String) }`.
-  - `documentKey` is the source `sha256`, threaded in so `ObservationID.derive` produces stable ids.
+- `protocol DocumentParser { static func canParse(_ data: Data) -> Bool; func parse(_ data: Data, subjectId: String) throws -> ParseResult }` — `subjectId` is threaded in so the parser derives content+subject-based ids.
+- `struct ParseResult { let observations: [Observation]; let skipped: [Skip] }`.
+- `struct Skip { enum Reason { case noCode, noDate, unrepresentableValue }; let reason; let label: String }`.
+- `enum ParseError: Error, Equatable { case unrecognizedFormat; case malformed(String) }`.
 
-- [ ] **Step 1: Declare the test target, then write the failing test**
-
-First add this test target to `Package.swift`'s `targets:` array (no `resources:` yet — fixtures arrive in Task 7):
+- [ ] **Step 1: Declare the test target** — add to `Package.swift` `targets:`:
 ```swift
         .testTarget(name: "HealthBridgeParsingTests", dependencies: ["HealthBridgeParsing", "BridgeKit"]),
 ```
 
-Then create `Tests/HealthBridgeParsingTests/DocumentParserTests.swift`:
+- [ ] **Step 2: Write failing test** — `Tests/HealthBridgeParsingTests/DocumentParserTests.swift`:
 ```swift
 import XCTest
 import BridgeKit
@@ -855,82 +960,77 @@ import BridgeKit
 
 private struct StubParser: DocumentParser {
     static func canParse(_ data: Data) -> Bool { !data.isEmpty }
-    func parse(_ data: Data, documentKey: String) throws -> [Observation] {
+    func parse(_ data: Data, subjectId: String) throws -> ParseResult {
         guard !data.isEmpty else { throw ParseError.malformed("empty") }
-        return []
+        return ParseResult(observations: [], skipped: [Skip(reason: .noCode, label: "x")])
     }
 }
 
 final class DocumentParserTests: XCTestCase {
-    func testCanParseReflectsContent() {
-        XCTAssertTrue(StubParser.canParse(Data([0x7b])))
-        XCTAssertFalse(StubParser.canParse(Data()))
-    }
-
+    func testCanParse() { XCTAssertTrue(StubParser.canParse(Data([0x7b]))); XCTAssertFalse(StubParser.canParse(Data())) }
     func testParseThrowsOnEmpty() {
-        XCTAssertThrowsError(try StubParser().parse(Data(), documentKey: "k")) { error in
-            XCTAssertEqual(error as? ParseError, .malformed("empty"))
-        }
+        XCTAssertThrowsError(try StubParser().parse(Data(), subjectId: "s")) { XCTAssertEqual($0 as? ParseError, .malformed("empty")) }
+    }
+    func testParseResultCarriesSkips() throws {
+        XCTAssertEqual(try StubParser().parse(Data([0x7b]), subjectId: "s").skipped.first?.reason, .noCode)
     }
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 3: Run to verify it fails** — Run: `swift test --filter DocumentParserTests`. Expected: FAIL.
 
-Run: `swift test --filter DocumentParserTests`
-Expected: FAIL — `DocumentParser` / `ParseError` not defined.
-
-- [ ] **Step 3: Implement**
-
-`Sources/HealthBridgeParsing/DocumentParser.swift`:
+- [ ] **Step 4: Implement** — `Sources/HealthBridgeParsing/DocumentParser.swift`:
 ```swift
 import Foundation
 import BridgeKit
 
-public enum ParseError: Error, Equatable {
-    case unrecognizedFormat
-    case malformed(String)
+public enum ParseError: Error, Equatable { case unrecognizedFormat; case malformed(String) }
+
+public struct Skip: Equatable, Sendable {
+    public enum Reason: Equatable, Sendable { case noCode, noDate, unrepresentableValue }
+    public let reason: Reason
+    public let label: String
+    public init(reason: Reason, label: String) { self.reason = reason; self.label = label }
+}
+
+public struct ParseResult: Sendable {
+    public let observations: [Observation]
+    public let skipped: [Skip]
+    public init(observations: [Observation], skipped: [Skip]) { self.observations = observations; self.skipped = skipped }
 }
 
 public protocol DocumentParser {
     static func canParse(_ data: Data) -> Bool
-    func parse(_ data: Data, documentKey: String) throws -> [Observation]
+    func parse(_ data: Data, subjectId: String) throws -> ParseResult
 }
 ```
+Delete `Sources/HealthBridgeParsing/Placeholder.swift`.
 
-Then delete the placeholder: `rm Sources/HealthBridgeParsing/Placeholder.swift`.
+- [ ] **Step 5: Run to verify pass** — Run: `swift test --filter DocumentParserTests`. Expected: PASS.
 
-- [ ] **Step 4: Run to verify pass**
-
-Run: `swift test --filter DocumentParserTests`
-Expected: both PASS.
-
-- [ ] **Step 5: Commit**
-
+- [ ] **Step 6: Commit**
 ```
 git add Package.swift Sources/HealthBridgeParsing/DocumentParser.swift Tests/HealthBridgeParsingTests/DocumentParserTests.swift
 git rm Sources/HealthBridgeParsing/Placeholder.swift
-git commit -m "feat(parsing): DocumentParser protocol and ParseError"
+github-agent-commit "feat(parsing): DocumentParser protocol with ParseResult and skips"
 ```
 
 ---
 
-## Task 7: FHIR R4 parser
+## Task 8: FHIR R4 parser (components, UTC dates, drop-and-log)
 
 **Files:**
-- Modify: `Package.swift` (add `resources: [.copy("Fixtures")]` to the `HealthBridgeParsingTests` target so `Bundle.module` is generated)
-- Create: `Sources/HealthBridgeParsing/FHIRParser.swift`
-- Create: `Tests/HealthBridgeParsingTests/Fixtures/observation-bodyweight.json`
-- Create: `Tests/HealthBridgeParsingTests/Fixtures/bundle-vitals-and-labs.json`
+- Modify: `Package.swift` (add `resources: [.copy("Fixtures")]` to `HealthBridgeParsingTests`)
+- Create: `Sources/HealthBridgeParsing/FHIRDate.swift`, `Sources/HealthBridgeParsing/FHIRParser.swift`
+- Create fixtures: `observation-bodyweight.json`, `bundle-vitals-and-labs.json`, `observation-nocode.json`, `bp-panel.json`, `observation-dateonly.json`, `observation-loinc-not-first.json`, `observation-string.json`, `observation-novalue.json`
 - Test: `Tests/HealthBridgeParsingTests/FHIRParserTests.swift`
 
 **Interfaces:**
-- Consumes: `DocumentParser`, `ParseError` (Task 6); `Observation`, `CodeableRef`, `ObservationValue`, `ObservationCategory`, `ObservationID`, `MappingTable` (BridgeKit); `ModelsR4`.
-- Produces: `struct FHIRParser: DocumentParser`. Accepts either a single `Observation` resource or a `Bundle` of them. Each parsed observation has `confidence = 1.0`, raw `code`/`value`/`unit`/`effectiveDate`/`category` populated, and `mapping` left `nil` (the CLI resolves mapping in Task 8 — keeps the parser's single responsibility "FHIR → raw observations").
+- `struct FHIRParser: DocumentParser` — FHIR R4 JSON (`Observation` or `Bundle`) → `ParseResult`. Each observation `confidence = 1.0`, `mapping = nil`. Drops no-code (`.noCode`), no-date (`.noDate`), no/unrepresentable value (`.unrepresentableValue`), each recorded in `skipped`. **Panel handling:** an Observation with no top-level value but a `component` array yields one Observation per component (blood pressure). **UTC dates:** offset-less/date-only FHIR dates resolve in UTC via `FHIRDate`.
 
-- [ ] **Step 1: Wire fixtures into the manifest, then create them**
+> Verified against FHIRModels 0.9.3: `Observation.code` is non-optional `CodeableConcept`; `value`/`effective` are optional enums (`Observation.ValueX?`/`EffectiveX?`); `Observation.component` is `[ObservationComponent]?` and each `ObservationComponent` has non-optional `code: CodeableConcept` and `value: ObservationComponent.ValueX?`; `Decimal` has no `.doubleValue` (wrap in `NSDecimalNumber`); `DateTime` exposes `.date` (year/month/day), `.time` (hour/minute/second), `.timeZone`.
 
-First update the `HealthBridgeParsingTests` target in `Package.swift` to copy the fixtures (required for `Bundle.module`):
+- [ ] **Step 1: Wire fixtures into the manifest, then create them** — update `HealthBridgeParsingTests` in `Package.swift`:
 ```swift
         .testTarget(
             name: "HealthBridgeParsingTests",
@@ -938,119 +1038,183 @@ First update the `HealthBridgeParsingTests` target in `Package.swift` to copy th
             resources: [.copy("Fixtures")]
         ),
 ```
-
-Then create `Tests/HealthBridgeParsingTests/Fixtures/observation-bodyweight.json`:
+`Fixtures/observation-bodyweight.json`:
 ```json
-{
-  "resourceType": "Observation",
-  "id": "bw1",
-  "status": "final",
-  "category": [
-    { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] }
-  ],
-  "code": {
-    "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ],
-    "text": "Body weight"
-  },
+{ "resourceType": "Observation", "id": "bw1", "status": "final",
+  "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
+  "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ], "text": "Body weight" },
   "effectiveDateTime": "2025-03-19T09:30:00-04:00",
-  "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" }
-}
+  "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } }
 ```
-
-`Tests/HealthBridgeParsingTests/Fixtures/bundle-vitals-and-labs.json`:
+`Fixtures/bundle-vitals-and-labs.json`:
 ```json
-{
-  "resourceType": "Bundle",
-  "type": "collection",
-  "entry": [
-    {
-      "resource": {
-        "resourceType": "Observation",
-        "id": "bw1",
-        "status": "final",
-        "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
-        "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
-        "effectiveDateTime": "2025-03-19T09:30:00-04:00",
-        "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" }
-      }
-    },
-    {
-      "resource": {
-        "resourceType": "Observation",
-        "id": "alt1",
-        "status": "final",
-        "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory" } ] } ],
-        "code": { "coding": [ { "system": "http://loinc.org", "code": "1742-6", "display": "ALT SerPl-cCnc" } ] },
-        "effectiveDateTime": "2025-03-19T09:30:00-04:00",
-        "valueQuantity": { "value": 22, "unit": "U/L", "system": "http://unitsofmeasure.org", "code": "U/L" }
-      }
-    }
-  ]
-}
+{ "resourceType": "Bundle", "type": "collection", "entry": [
+  { "resource": { "resourceType": "Observation", "id": "bw1", "status": "final",
+    "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
+    "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+    "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+    "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } } },
+  { "resource": { "resourceType": "Observation", "id": "alt1", "status": "final",
+    "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory" } ] } ],
+    "code": { "coding": [ { "system": "http://loinc.org", "code": "1742-6", "display": "ALT" } ] },
+    "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+    "valueQuantity": { "value": 22, "unit": "U/L", "system": "http://unitsofmeasure.org", "code": "U/L" } } }
+]}
+```
+`Fixtures/observation-nocode.json`:
+```json
+{ "resourceType": "Observation", "id": "nc1", "status": "final",
+  "code": { "text": "Free text only" },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+  "valueQuantity": { "value": 1, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } }
+```
+`Fixtures/bp-panel.json` (panel with components, no top-level value):
+```json
+{ "resourceType": "Observation", "id": "bp1", "status": "final",
+  "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
+  "code": { "coding": [ { "system": "http://loinc.org", "code": "85354-9", "display": "Blood pressure panel" } ] },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+  "component": [
+    { "code": { "coding": [ { "system": "http://loinc.org", "code": "8480-6", "display": "Systolic" } ] },
+      "valueQuantity": { "value": 120, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]" } },
+    { "code": { "coding": [ { "system": "http://loinc.org", "code": "8462-4", "display": "Diastolic" } ] },
+      "valueQuantity": { "value": 80, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]" } }
+  ] }
+```
+`Fixtures/observation-dateonly.json` (date-only → UTC midnight):
+```json
+{ "resourceType": "Observation", "id": "do1", "status": "final",
+  "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+  "effectiveDateTime": "2025-03-19",
+  "valueQuantity": { "value": 70, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } }
+```
+`Fixtures/observation-loinc-not-first.json` (LOINC is the second coding):
+```json
+{ "resourceType": "Observation", "id": "lf1", "status": "final",
+  "code": { "coding": [
+    { "system": "http://example.org/local", "code": "WT", "display": "Weight (local)" },
+    { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+  "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } }
+```
+`Fixtures/observation-string.json` (valueString):
+```json
+{ "resourceType": "Observation", "id": "s1", "status": "final",
+  "code": { "coding": [ { "system": "http://loinc.org", "code": "12345-6", "display": "Note" } ] },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+  "valueString": "positive" }
+```
+`Fixtures/observation-novalue.json` (no value, no components → unrepresentable):
+```json
+{ "resourceType": "Observation", "id": "nv1", "status": "final",
+  "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00" }
 ```
 
-- [ ] **Step 2: Write the failing test**
-
-`Tests/HealthBridgeParsingTests/FHIRParserTests.swift`:
+- [ ] **Step 2: Write the failing test** — `Tests/HealthBridgeParsingTests/FHIRParserTests.swift`:
 ```swift
 import XCTest
 import BridgeKit
 @testable import HealthBridgeParsing
 
 final class FHIRParserTests: XCTestCase {
-    private func fixture(_ name: String) throws -> Data {
-        let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: "json")
-        return try Data(contentsOf: try XCTUnwrap(url))
+    private func fixture(_ n: String) throws -> Data {
+        try Data(contentsOf: try XCTUnwrap(Bundle.module.url(forResource: "Fixtures/\(n)", withExtension: "json")))
     }
+    private func parse(_ n: String) throws -> ParseResult { try FHIRParser().parse(try fixture(n), subjectId: "s") }
 
     func testCanParseDetectsFHIR() throws {
         XCTAssertTrue(FHIRParser.canParse(try fixture("observation-bodyweight")))
         XCTAssertFalse(FHIRParser.canParse(Data("<ClinicalDocument/>".utf8)))
     }
-
     func testParsesSingleObservation() throws {
-        let obs = try FHIRParser().parse(try fixture("observation-bodyweight"), documentKey: "doc1")
-        XCTAssertEqual(obs.count, 1)
-        let o = try XCTUnwrap(obs.first)
-        XCTAssertEqual(o.code?.code, "29463-7")
-        XCTAssertEqual(o.code?.system, "http://loinc.org")
-        XCTAssertEqual(o.name, "Body weight")
-        XCTAssertEqual(o.value, .quantity(72.5))
-        XCTAssertEqual(o.unit, "kg")
-        XCTAssertEqual(o.category, .vital)
-        XCTAssertEqual(o.confidence, 1.0)
-        XCTAssertNil(o.mapping) // parser does not resolve mapping
-        // 2025-03-19T09:30:00-04:00 == 1742391000 epoch
+        let o = try XCTUnwrap(parse("observation-bodyweight").observations.first)
+        XCTAssertEqual(o.code?.code, "29463-7"); XCTAssertEqual(o.code?.system, "http://loinc.org")
+        XCTAssertEqual(o.name, "Body weight"); XCTAssertEqual(o.value, .quantity(72.5)); XCTAssertEqual(o.unit, "kg")
+        XCTAssertEqual(o.category, .vital); XCTAssertEqual(o.confidence, 1.0); XCTAssertNil(o.mapping)
         XCTAssertEqual(o.effectiveDate.timeIntervalSince1970, 1_742_391_000, accuracy: 1)
     }
-
-    func testParsesBundleWithVitalAndLab() throws {
-        let obs = try FHIRParser().parse(try fixture("bundle-vitals-and-labs"), documentKey: "doc1")
-        XCTAssertEqual(obs.count, 2)
-        XCTAssertEqual(obs.first?.category, .vital)
-        XCTAssertEqual(obs.last?.category, .lab)
-        XCTAssertEqual(obs.last?.code?.code, "1742-6")
+    func testParsesBundle() throws {
+        let r = try parse("bundle-vitals-and-labs")
+        XCTAssertEqual(r.observations.count, 2)
+        XCTAssertEqual(r.observations.first?.category, .vital); XCTAssertEqual(r.observations.last?.category, .lab)
     }
-
-    func testStableIDsAcrossRuns() throws {
-        let a = try FHIRParser().parse(try fixture("observation-bodyweight"), documentKey: "doc1")
-        let b = try FHIRParser().parse(try fixture("observation-bodyweight"), documentKey: "doc1")
-        XCTAssertEqual(a.first?.id, b.first?.id)
+    func testBloodPressurePanelYieldsTwoMappableComponents() throws {
+        let r = try parse("bp-panel")
+        XCTAssertEqual(r.observations.count, 2)
+        let codes = Set(r.observations.compactMap { $0.code?.code })
+        XCTAssertEqual(codes, ["8480-6", "8462-4"])
+        for o in r.observations {
+            XCTAssertNotNil(MappingTable.resolve(loinc: o.code?.code, value: o.value, unit: o.unit))
+        }
     }
-
-    func testMalformedJSONThrows() {
-        XCTAssertThrowsError(try FHIRParser().parse(Data("{ not json".utf8), documentKey: "k"))
+    func testDateOnlyResolvesUTCMidnight() throws {
+        // "2025-03-19" -> 2025-03-19T00:00:00Z = 1_742_342_400, regardless of machine TZ.
+        let o = try XCTUnwrap(parse("observation-dateonly").observations.first)
+        XCTAssertEqual(o.effectiveDate.timeIntervalSince1970, 1_742_342_400, accuracy: 1)
     }
+    func testLOINCNotFirstCodingIsChosen() throws {
+        XCTAssertEqual(try parse("observation-loinc-not-first").observations.first?.code?.code, "29463-7")
+    }
+    func testValueStringObservation() throws {
+        let o = try XCTUnwrap(parse("observation-string").observations.first)
+        XCTAssertEqual(o.value, .string("positive")); XCTAssertNil(o.unit)
+    }
+    func testNoValueIsSkipped() throws {
+        let r = try parse("observation-novalue")
+        XCTAssertEqual(r.observations.count, 0)
+        XCTAssertEqual(r.skipped.first?.reason, .unrepresentableValue)
+    }
+    func testDropsAndRecordsCodeless() throws {
+        let r = try parse("observation-nocode")
+        XCTAssertEqual(r.observations.count, 0)
+        XCTAssertEqual(r.skipped.first?.reason, .noCode); XCTAssertEqual(r.skipped.first?.label, "Free text only")
+    }
+    func testMalformedThrows() { XCTAssertThrowsError(try FHIRParser().parse(Data("{ not".utf8), subjectId: "s")) }
 }
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+- [ ] **Step 3: Run to verify it fails** — Run: `swift test --filter FHIRParserTests`. Expected: FAIL.
 
-Run: `swift test --filter FHIRParserTests`
-Expected: FAIL — `FHIRParser` not defined.
+- [ ] **Step 4: Implement** — `Sources/HealthBridgeParsing/FHIRDate.swift`:
+```swift
+import Foundation
+import ModelsR4
 
-- [ ] **Step 4: Implement**
+/// Converts FHIR temporal values to a Foundation Date, resolving timezone-less / date-only
+/// values in UTC so the same input yields the same Date on any machine.
+enum FHIRDate {
+    private static func utcCalendar(_ tz: TimeZone?) -> Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tz ?? TimeZone(identifier: "UTC")!
+        return cal
+    }
 
+    static func date(from dt: DateTime) -> Date? {
+        var c = DateComponents()
+        c.year = dt.date.year
+        c.month = dt.date.month.map(Int.init)
+        c.day = dt.date.day.map(Int.init)
+        if let t = dt.time {
+            c.hour = Int(t.hour); c.minute = Int(t.minute)
+            c.second = Int(NSDecimalNumber(decimal: t.second).doubleValue.rounded())
+        } else {
+            c.hour = 0; c.minute = 0; c.second = 0   // date-only -> UTC midnight
+        }
+        return utcCalendar(dt.timeZone).date(from: c)
+    }
+
+    static func date(from inst: Instant) -> Date? {
+        var c = DateComponents()
+        c.year = inst.date.year
+        c.month = inst.date.month.map(Int.init)
+        c.day = inst.date.day.map(Int.init)
+        c.hour = Int(inst.time.hour); c.minute = Int(inst.time.minute)
+        c.second = Int(NSDecimalNumber(decimal: inst.time.second).doubleValue.rounded())
+        return utcCalendar(inst.timeZone).date(from: c)
+    }
+}
+```
 `Sources/HealthBridgeParsing/FHIRParser.swift`:
 ```swift
 import Foundation
@@ -1058,7 +1222,6 @@ import BridgeKit
 import ModelsR4
 
 public struct FHIRParser: DocumentParser {
-
     public init() {}
 
     public static func canParse(_ data: Data) -> Bool {
@@ -1067,254 +1230,351 @@ public struct FHIRParser: DocumentParser {
         return type == "Bundle" || type == "Observation"
     }
 
-    public func parse(_ data: Data, documentKey: String) throws -> [Observation] {
-        let decoder = JSONDecoder()
-        let fhirObservations = try decodeObservations(data, decoder: decoder)
-        return fhirObservations.compactMap { convert($0, documentKey: documentKey) }
+    public func parse(_ data: Data, subjectId: String) throws -> ParseResult {
+        let fhir = try decodeObservations(data)
+        var observations: [Observation] = []
+        var skipped: [Skip] = []
+        for o in fhir {
+            for r in convert(o, subjectId: subjectId) {
+                switch r { case .success(let obs): observations.append(obs); case .failure(let s): skipped.append(s) }
+            }
+        }
+        return ParseResult(observations: observations, skipped: skipped)
     }
 
-    // MARK: - Decoding
-
-    private func decodeObservations(_ data: Data, decoder: JSONDecoder) throws -> [ModelsR4.Observation] {
-        // Try a Bundle first, then a bare Observation.
+    private func decodeObservations(_ data: Data) throws -> [ModelsR4.Observation] {
+        let decoder = JSONDecoder()
         if let bundle = try? decoder.decode(ModelsR4.Bundle.self, from: data) {
             return bundle.entry?.compactMap { $0.resource?.get(if: ModelsR4.Observation.self) } ?? []
         }
-        do {
-            let single = try decoder.decode(ModelsR4.Observation.self, from: data)
-            return [single]
-        } catch {
-            throw ParseError.malformed("not a FHIR Bundle or Observation: \(error)")
-        }
+        do { return [try decoder.decode(ModelsR4.Observation.self, from: data)] }
+        catch { throw ParseError.malformed("not a FHIR Bundle or Observation: \(error)") }
     }
 
-    // MARK: - Conversion (returns nil for observations we cannot represent)
+    private enum ConvertResult { case success(Observation); case failure(Skip) }
 
-    private func convert(_ o: ModelsR4.Observation, documentKey: String) -> Observation? {
-        guard let coding = loincCoding(o.code),
-              let effective = effectiveDate(o.effective) else { return nil }
+    /// A panel (components, no top-level value) yields one observation per component;
+    /// otherwise a single observation from the top-level value.
+    private func convert(_ o: ModelsR4.Observation, subjectId: String) -> [ConvertResult] {
+        let effective = effectiveDate(o.effective)
+        let cat = category(o.category)
+        if o.value == nil, let comps = o.component, !comps.isEmpty {
+            return comps.map { c in
+                build(code: c.code, value: observationValue(c.value), effective: effective, category: cat, subjectId: subjectId)
+            }
+        }
+        return [build(code: o.code, value: observationValue(o.value), effective: effective, category: cat, subjectId: subjectId)]
+    }
 
-        let code = coding.code?.value?.string
+    private func build(code: CodeableConcept, value: (ObservationValue, String?, String)?,
+                       effective: Date?, category: ObservationCategory, subjectId: String) -> ConvertResult {
+        let label = code.text?.value?.string ?? code.coding?.first?.display?.value?.string ?? "Unknown"
+        guard let coding = loincCoding(code) else { return .failure(Skip(reason: .noCode, label: label)) }
+        guard let effective else { return .failure(Skip(reason: .noDate, label: label)) }
+        guard let (val, unit, raw) = value else { return .failure(Skip(reason: .unrepresentableValue, label: label)) }
+        let codeStr = coding.code?.value?.string
         let system = coding.system?.value?.url.absoluteString
-        let display = coding.display?.value?.string
-            ?? o.code.text?.value?.string
-            ?? code
-            ?? "Unknown"
-
-        guard let (value, unit, rawString) = observationValue(o.value) else { return nil }
-
-        let id = ObservationID.derive(documentKey: documentKey, system: system, code: code,
-                                      effectiveDate: effective, rawValue: rawString, unit: unit)
-
-        return Observation(
-            id: id,
-            code: (system != nil && code != nil) ? CodeableRef(system: system!, code: code!, display: display) : nil,
-            name: display,
-            value: value,
-            unit: unit,
-            effectiveDate: effective,
-            category: category(o.category),
-            mapping: nil,
-            confidence: 1.0,
-            sourceLocator: nil
-        )
+        let display = coding.display?.value?.string ?? code.text?.value?.string ?? codeStr ?? "Unknown"
+        let id = ObservationID.derive(subjectId: subjectId, system: system, code: codeStr,
+                                      effectiveDate: effective, rawValue: raw, unit: unit)
+        let ref = (system != nil && codeStr != nil) ? CodeableRef(system: system!, code: codeStr!, display: display) : nil
+        return .success(Observation(id: id, code: ref, name: display, value: val, unit: unit,
+                                    effectiveDate: effective, category: category, mapping: nil,
+                                    confidence: 1.0, sourceLocator: nil))
     }
 
     private func loincCoding(_ code: CodeableConcept) -> Coding? {
         let codings = code.coding ?? []
-        return codings.first { $0.system?.value?.url.absoluteString == "http://loinc.org" }
-            ?? codings.first
+        return codings.first { $0.system?.value?.url.absoluteString == "http://loinc.org" } ?? codings.first
     }
 
-    // `value` is the optional enum `Observation.ValueX?`. Unwrap once, then switch the
-    // non-optional (clearer than `case .quantity(let q)?`). `ValueX` has many cases
-    // (.quantity, .string, .dateTime, ...) — `default` covers everything we don't represent.
     private func observationValue(_ value: Observation.ValueX?) -> (ObservationValue, String?, String)? {
         guard let value else { return nil }
         switch value {
-        case .quantity(let q):
-            // FHIRDecimal -> Decimal -> Double. Decimal has NO `.doubleValue`; wrap in NSDecimalNumber.
-            guard let decimal = q.value?.value?.decimal else { return nil }
-            let d = NSDecimalNumber(decimal: decimal).doubleValue
-            let unit = q.code?.value?.string ?? q.unit?.value?.string
-            return (.quantity(d), unit, stableNumberString(d))
-        case .string(let s):
-            guard let str = s.value?.string else { return nil }
-            return (.string(str), nil, str)
-        default:
-            return nil
+        case .quantity(let q): return quantity(q)
+        case .string(let s): return string(s)
+        default: return nil
         }
     }
+    private func observationValue(_ value: ObservationComponent.ValueX?) -> (ObservationValue, String?, String)? {
+        guard let value else { return nil }
+        switch value {
+        case .quantity(let q): return quantity(q)
+        case .string(let s): return string(s)
+        default: return nil
+        }
+    }
+    private func quantity(_ q: Quantity) -> (ObservationValue, String?, String)? {
+        guard let decimal = q.value?.value?.decimal else { return nil }
+        let d = NSDecimalNumber(decimal: decimal).doubleValue
+        let unit = q.code?.value?.string ?? q.unit?.value?.string
+        return (.quantity(d), unit, stableNumberString(d))
+    }
+    private func string(_ s: FHIRPrimitive<FHIRString>) -> (ObservationValue, String?, String)? {
+        guard let str = s.value?.string else { return nil }
+        return (.string(str), nil, str)
+    }
 
-    // `effective` is `Observation.EffectiveX?`. Unwrap once, then switch. EffectiveX also has
-    // a `.timing(Timing)` case, so `default` is required. `asNSDate()` throws and is called on
-    // the unwrapped DateTime/Instant struct (the primitive's `.value`).
     private func effectiveDate(_ effective: Observation.EffectiveX?) -> Date? {
         guard let effective else { return nil }
         switch effective {
-        case .dateTime(let dt):
-            return try? dt.value?.asNSDate()
-        case .instant(let inst):
-            return try? inst.value?.asNSDate()
-        case .period(let p):
-            if let start = p.start?.value { return try? start.asNSDate() }
-            return nil
-        default:
-            return nil
+        case .dateTime(let dt): return dt.value.flatMap(FHIRDate.date(from:))
+        case .instant(let inst): return inst.value.flatMap(FHIRDate.date(from:))
+        case .period(let p): return p.start?.value.flatMap(FHIRDate.date(from:))
+        default: return nil
         }
     }
 
     private func category(_ categories: [CodeableConcept]?) -> ObservationCategory {
-        let codes = (categories ?? []).flatMap { $0.coding ?? [] }
-            .compactMap { $0.code?.value?.string }
+        let codes = (categories ?? []).flatMap { $0.coding ?? [] }.compactMap { $0.code?.value?.string }
         if codes.contains("vital-signs") { return .vital }
         if codes.contains("laboratory") { return .lab }
         return .other
     }
 
-    /// Render a Double without locale or trailing-zero noise so ids stay stable.
+    /// Lossless number rendering for id stability (no %g rounding); integral values drop the .0.
     private func stableNumberString(_ d: Double) -> String {
-        if d == d.rounded() { return String(Int(d)) }
-        return String(format: "%g", d)
+        d.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(d)) : String(d)
     }
 }
 ```
 
-> Implementation notes (verified against FHIRModels 0.9.3 by building a probe — these are facts, not guesses):
-> - `Observation.code` is **non-optional** `CodeableConcept` (so `loincCoding(o.code)` passes it directly; no `?`). `Observation.value` is `Observation.ValueX?` and `Observation.effective` is `Observation.EffectiveX?` (both optional — unwrapped once with `guard let` before switching the non-optional).
-> - Case labels are exactly `.quantity`, `.string`, `.dateTime`, `.instant`, `.period`. `ValueX` and `EffectiveX` each have additional cases (e.g. `EffectiveX.timing`), so the `default` branches are required for exhaustiveness.
-> - Quantity number path: `q.value` is `FHIRPrimitive<FHIRDecimal>?` → `q.value?.value?.decimal` is `Decimal` → `NSDecimalNumber(decimal:).doubleValue`. `Decimal` itself has no `.doubleValue`.
-> - `Coding` unwrap chains: `coding.system?.value?.url.absoluteString`, `coding.code?.value?.string`, `coding.display?.value?.string`.
-> - `asNSDate()` exists, is `throws`, and is called on the unwrapped `DateTime`/`Instant` struct (the primitive's `.value`), e.g. `dt.value?.asNSDate()` — NOT on the `FHIRPrimitive` itself.
-
-- [ ] **Step 5: Run to verify pass**
-
-Run: `swift test --filter FHIRParserTests`
-Expected: all five PASS.
+- [ ] **Step 5: Run to verify pass** — Run: `swift test --filter FHIRParserTests`. Expected: all PASS.
 
 - [ ] **Step 6: Commit**
-
 ```
-git add Package.swift Sources/HealthBridgeParsing/FHIRParser.swift Tests/HealthBridgeParsingTests
-git commit -m "feat(parsing): FHIR R4 JSON parser for Observation and Bundle resources"
+git add Package.swift Sources/HealthBridgeParsing Tests/HealthBridgeParsingTests
+github-agent-commit "feat(parsing): FHIR R4 parser — components, UTC dates, lossless ids, drop-and-log"
 ```
 
 ---
 
-## Task 8: healthbridge CLI
+## Task 9: healthbridge CLI (parse + subject subcommands)
 
 **Files:**
-- Modify: `Package.swift` (add the `healthbridgeTests` target with `resources: [.copy("Fixtures")]`)
+- Modify: `Package.swift` (add `healthbridgeTests` target with `resources: [.copy("Fixtures")]`)
 - Create: `Sources/healthbridge/HealthBridge.swift`
-- Delete: `Sources/healthbridge/main.swift` (the Task 1 entry-point stub — replaced by `HealthBridge.swift`'s `@main`)
-- Create: `Tests/healthbridgeTests/Fixtures/bundle-vitals-and-labs.json` (copy of the Task 7 fixture)
-- Test: `Tests/healthbridgeTests/CLIIntegrationTests.swift`
+- Delete: `Sources/healthbridge/main.swift`
+- Create fixtures: `bundle-vitals-and-labs.json`, `patient-bundle.json`, `patient-bundle-mismatch.json`, `bundle-duplicate.json`, `empty-bundle.json`
+- Test: `Tests/healthbridgeTests/BridgeBuilderTests.swift`, `Tests/healthbridgeTests/CLIRunTests.swift`
 
 **Interfaces:**
-- Consumes: `FHIRParser`, `DocumentParser`, `ParseError` (HealthBridgeParsing); `BridgeDocument`, `Source`, `SourceKind`, `Extractor`, `Observation`, `MappingTable`, `BridgeJSON`, `validate`, `ObservationValue` (BridgeKit); `ArgumentParser`; `CryptoKit`.
-- Produces: a `healthbridge parse <input> [--out <path>] [--format auto|fhir]` command. Behaviour: read file → compute `sha256` → select parser → `[Observation]` → resolve each observation's `mapping` via `MappingTable` → assemble `BridgeDocument(schemaVersion: 1, …, extractor: Extractor("fhir-parser", "0.1.0"))` → `validate` (abort on any `.error`) → write deterministic JSON to `--out` (default: `<input-basename>.bridge.json`) → print a summary (`N observations, M mapped, K unmapped`) to stderr. Exposes a testable `BridgeBuilder.build(data:fileName:) throws -> BridgeDocument` so the integration test does not shell out.
+- `BridgeBuilder.build(data:fileName:subject:now:) throws -> BuildResult` where `struct BuildResult { let document: BridgeDocument; let skipped: [Skip] }` — sha256 → `FHIRParser().parse(_, subjectId: subject.id)` (ONE parse) → resolve mapping → dedupe by id → assemble with `extractedAt = now`. `now: Date = Date()` so tests fix the clock.
+- `enum PatientMatchResult { case match, mismatch, noPatient, incomplete }`; `enum PatientMatch { static func check(data:subject:) -> PatientMatchResult; static func extracted(data:) -> (name: String, dob: String)? }`. Flexible match: case-insensitive first+last name tokens + dob equality. Handles a `Bundle` or a bare `Patient`.
+- CLI: `parse <input> [--config][--subject][--data-root][--verbose|--quiet][--force][--allow-unverified-subject]`; `subject add --label --name --dob [--key][--config]`; `subject list [--config]`.
+- Output: `<dataRoot>/subjects/<subject.id>/<sourceSha>.bridge.json`. Exit code `2` when a document is written with zero observations.
 
-- [ ] **Step 1: Declare the CLI test target and copy the fixture**
-
-Add the `healthbridgeTests` target to `Package.swift`'s `targets:` array:
+- [ ] **Step 1: Declare the CLI test target + fixtures** — add to `Package.swift`:
 ```swift
         .testTarget(
             name: "healthbridgeTests",
-            dependencies: ["healthbridge"],
+            dependencies: ["healthbridge", "BridgeKit", "HealthBridgeConfig"],
             resources: [.copy("Fixtures")]
         ),
 ```
-
-Then copy the Task 7 fixture so the CLI test has its own resource:
+Create fixtures:
 ```
 mkdir -p Tests/healthbridgeTests/Fixtures
 cp Tests/HealthBridgeParsingTests/Fixtures/bundle-vitals-and-labs.json Tests/healthbridgeTests/Fixtures/bundle-vitals-and-labs.json
 ```
+`Fixtures/patient-bundle.json` (Patient matches subject "Jane Public" / 2000-01-01):
+```json
+{ "resourceType": "Bundle", "type": "collection", "entry": [
+  { "resource": { "resourceType": "Patient", "id": "p1",
+    "name": [ { "family": "Public", "given": ["Jane"] } ], "birthDate": "2000-01-01" } },
+  { "resource": { "resourceType": "Observation", "id": "bw1", "status": "final",
+    "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
+    "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+    "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+    "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } } }
+]}
+```
+`Fixtures/patient-bundle-mismatch.json` — same as `patient-bundle.json` but Patient name `John Sample`, birthDate `1980-06-15`.
+`Fixtures/bundle-duplicate.json` — the body-weight observation twice (FHIR ids `bw1`/`bw1-dup`, identical content), no Patient.
+`Fixtures/empty-bundle.json`:
+```json
+{ "resourceType": "Bundle", "type": "collection", "entry": [] }
+```
 
-- [ ] **Step 2: Write the failing test**
-
-`Tests/healthbridgeTests/CLIIntegrationTests.swift`:
+- [ ] **Step 2: Write the failing tests** — `Tests/healthbridgeTests/BridgeBuilderTests.swift`:
 ```swift
 import XCTest
 import BridgeKit
+import HealthBridgeConfig
 @testable import healthbridge
 
-final class CLIIntegrationTests: XCTestCase {
-    private func fixture(_ name: String) throws -> Data {
-        let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: "json")
-        return try Data(contentsOf: try XCTUnwrap(url))
+final class BridgeBuilderTests: XCTestCase {
+    private func fixture(_ n: String) throws -> Data {
+        try Data(contentsOf: try XCTUnwrap(Bundle.module.url(forResource: "Fixtures/\(n)", withExtension: "json")))
+    }
+    private let subject = SubjectRef(id: "11111111-1111-1111-1111-111111111111", label: "Jane",
+                                     hash: "h", name: "Jane Public", dob: "2000-01-01")
+    private let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+    private func entry(_ name: String, _ dob: String, key: String = "jane") -> SubjectEntry {
+        SubjectEntry(key: key, subjectId: "uuid", label: "L", name: name, dob: dob)
     }
 
-    func testBuildsValidBridgeDocument() throws {
-        let data = try fixture("bundle-vitals-and-labs")
-        let doc = try BridgeBuilder.build(data: data, fileName: "bundle-vitals-and-labs.json")
-
-        XCTAssertEqual(doc.schemaVersion, 1)
-        XCTAssertEqual(doc.source.kind, .fhir)
-        XCTAssertFalse(doc.source.sha256.isEmpty)
-        XCTAssertEqual(doc.observations.count, 2)
-
-        // Body weight is mapped; ALT lab is not.
-        let weight = try XCTUnwrap(doc.observations.first { $0.code?.code == "29463-7" })
-        XCTAssertEqual(weight.mapping?.quantityType, "HKQuantityTypeIdentifierBodyMass")
-        let alt = try XCTUnwrap(doc.observations.first { $0.code?.code == "1742-6" })
-        XCTAssertNil(alt.mapping)
-
-        // Validation passes (no errors).
-        XCTAssertFalse(validate(doc).contains { $0.severity == .error })
+    func testBuildsValidSubjectBoundDocument() throws {
+        let r = try BridgeBuilder.build(data: try fixture("bundle-vitals-and-labs"), fileName: "f.json", subject: subject, now: fixedNow)
+        XCTAssertEqual(r.document.subject.id, subject.id)
+        XCTAssertEqual(r.document.observations.count, 2)
+        XCTAssertEqual(try XCTUnwrap(r.document.observations.first { $0.code?.code == "29463-7" }).mapping?.quantityType,
+                       "HKQuantityTypeIdentifierBodyMass")
+        XCTAssertNil(try XCTUnwrap(r.document.observations.first { $0.code?.code == "1742-6" }).mapping)
+        XCTAssertFalse(validate(r.document).contains { $0.severity == .error })
     }
-
-    func testBuildIsDeterministic() throws {
-        let data = try fixture("bundle-vitals-and-labs")
-        let a = try BridgeJSON.encoder.encode(BridgeBuilder.build(data: data, fileName: "f.json"))
-        let b = try BridgeJSON.encoder.encode(BridgeBuilder.build(data: data, fileName: "f.json"))
+    func testDedupes() throws {
+        XCTAssertEqual(try BridgeBuilder.build(data: try fixture("bundle-duplicate"), fileName: "d.json", subject: subject, now: fixedNow).document.observations.count, 1)
+    }
+    func testDeterministicWithFixedClock() throws {
+        let d = try fixture("bundle-vitals-and-labs")
+        let a = try BridgeJSON.encoder.encode(BridgeBuilder.build(data: d, fileName: "f.json", subject: subject, now: fixedNow).document)
+        let b = try BridgeJSON.encoder.encode(BridgeBuilder.build(data: d, fileName: "f.json", subject: subject, now: fixedNow).document)
         XCTAssertEqual(a, b)
+    }
+    func testCrossCheckMatch() throws {
+        XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle"), subject: entry("Jane Public", "2000-01-01")), .match)
+    }
+    func testCrossCheckMismatch() throws {
+        XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle-mismatch"), subject: entry("Jane Public", "2000-01-01")), .mismatch)
+    }
+    func testCrossCheckNoPatient() throws {
+        XCTAssertEqual(PatientMatch.check(data: try fixture("bundle-duplicate"), subject: entry("Jane Public", "2000-01-01")), .noPatient)
+    }
+    func testCrossCheckFlexibleMiddleName() throws {
+        // Roster "Jane Public" should still match a document Patient "Jane Q Public" (first+last tokens).
+        XCTAssertEqual(PatientMatch.check(data: try fixture("patient-bundle"), subject: entry("Jane Q Public", "2000-01-01")), .match)
+    }
+}
+```
+`Tests/healthbridgeTests/CLIRunTests.swift` (runs the built executable):
+```swift
+import XCTest
+
+final class CLIRunTests: XCTestCase {
+    private var binary: URL {
+        // The test bundle sits next to the built products in .build/<config>/.
+        Bundle(for: CLIRunTests.self).bundleURL.deletingLastPathComponent().appendingPathComponent("healthbridge")
+    }
+    private func fixturePath(_ n: String) throws -> String {
+        try XCTUnwrap(Bundle.module.url(forResource: "Fixtures/\(n)", withExtension: "json")).path
+    }
+    @discardableResult
+    private func run(_ args: [String]) throws -> (status: Int32, err: String) {
+        let p = Process(); p.executableURL = binary; p.arguments = args
+        let ep = Pipe(); p.standardError = ep; p.standardOutput = Pipe()
+        try p.run(); p.waitUntilExit()
+        let err = String(decoding: ep.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return (p.terminationStatus, err)
+    }
+    private func tmpConfig() throws -> String {
+        let dir = NSTemporaryDirectory() + "hbcli-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = dir + "/config.toml"
+        let r = try run(["subject", "add", "--label", "Jane", "--name", "Jane Public", "--dob", "2000-01-01", "--config", path])
+        XCTAssertEqual(r.status, 0, r.err)
+        return path
+    }
+
+    func testNoSubjectFails() throws {
+        let cfg = NSTemporaryDirectory() + "empty-\(UUID().uuidString).toml"
+        let r = try run(["parse", try fixturePath("bundle-vitals-and-labs"), "--config", cfg])
+        XCTAssertNotEqual(r.status, 0)
+    }
+    func testUnknownSubjectFails() throws {
+        let r = try run(["parse", try fixturePath("bundle-vitals-and-labs"), "--config", try tmpConfig(), "--subject", "nobody"])
+        XCTAssertNotEqual(r.status, 0)
+    }
+    func testPatientMismatchRefuses() throws {
+        let r = try run(["parse", try fixturePath("patient-bundle-mismatch"), "--config", try tmpConfig(), "--subject", "jane"])
+        XCTAssertNotEqual(r.status, 0)
+    }
+    func testWritesOutputAndSummary() throws {
+        let cfg = try tmpConfig()
+        let dataRoot = NSTemporaryDirectory() + "hbdata-\(UUID().uuidString)"
+        let r = try run(["parse", try fixturePath("patient-bundle"), "--config", cfg, "--subject", "jane", "--data-root", dataRoot])
+        XCTAssertEqual(r.status, 0, r.err)
+        XCTAssertTrue(r.err.contains("observations"))
+    }
+    func testQuietSuppressesSummary() throws {
+        let r = try run(["parse", try fixturePath("patient-bundle"), "--config", try tmpConfig(), "--subject", "jane",
+                         "--data-root", NSTemporaryDirectory() + "q-\(UUID().uuidString)", "--quiet"])
+        XCTAssertEqual(r.status, 0, r.err)
+        XCTAssertFalse(r.err.contains("observations"))
+    }
+    func testVerboseAndQuietTogetherErrors() throws {
+        let r = try run(["parse", try fixturePath("patient-bundle"), "--config", try tmpConfig(), "--subject", "jane",
+                         "--verbose", "--quiet"])
+        XCTAssertNotEqual(r.status, 0)
     }
 }
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+- [ ] **Step 3: Run to verify it fails** — Run: `swift test --filter "BridgeBuilderTests|CLIRunTests"`. Expected: FAIL (CLIRunTests also needs the binary built — Step 5 builds it).
 
-Run: `swift test --filter CLIIntegrationTests`
-Expected: FAIL — `BridgeBuilder` not defined.
-
-- [ ] **Step 4: Implement the CLI**
-
-`Sources/healthbridge/HealthBridge.swift`:
+- [ ] **Step 4: Implement** — `Sources/healthbridge/HealthBridge.swift`:
 ```swift
 import Foundation
 import CryptoKit
 import ArgumentParser
 import BridgeKit
+import HealthBridgeConfig
 import HealthBridgeParsing
+import ModelsR4
 
-/// Pure-ish assembly step, separated from I/O so it is unit-testable.
+public struct BuildResult { public let document: BridgeDocument; public let skipped: [Skip] }
+
 public enum BridgeBuilder {
-    public static func build(data: Data, fileName: String) throws -> BridgeDocument {
+    public static func build(data: Data, fileName: String, subject: SubjectRef, now: Date = Date()) throws -> BuildResult {
         let sha = sha256Hex(data)
-
         guard FHIRParser.canParse(data) else { throw ParseError.unrecognizedFormat }
-        let raw = try FHIRParser().parse(data, documentKey: sha)
-
-        let resolved = raw.map { o -> Observation in
+        let result = try FHIRParser().parse(data, subjectId: subject.id)
+        let resolved = result.observations.map { o -> Observation in
             var o = o
             o.mapping = MappingTable.resolve(loinc: o.code?.code, value: o.value, unit: o.unit)
             return o
         }
-
+        var seen = Set<String>()
+        let deduped = resolved.filter { seen.insert($0.id).inserted }
         let doc = BridgeDocument(
             schemaVersion: BridgeDocument.currentSchemaVersion,
-            source: Source(kind: .fhir, fileName: fileName, sha256: sha,
-                           extractedAt: Date(),
+            source: Source(kind: .fhir, fileName: fileName, sha256: sha, extractedAt: now,
                            extractor: Extractor(engine: "fhir-parser", version: "0.1.0")),
-            subject: nil,
-            observations: resolved
-        )
-        return doc
+            subject: subject, observations: deduped)
+        return BuildResult(document: doc, skipped: result.skipped)
     }
+    public static func sha256Hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+}
 
-    static func sha256Hex(_ data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+public enum PatientMatchResult { case match, mismatch, noPatient, incomplete }
+
+public enum PatientMatch {
+    public static func check(data: Data, subject: SubjectEntry) -> PatientMatchResult {
+        guard let patient = firstPatient(data) else { return .noPatient }
+        guard let (name, dob) = nameAndDOB(patient), !name.isEmpty, !dob.isEmpty else { return .incomplete }
+        let docTokens = name.lowercased().split(separator: " ").map(String.init)
+        let subjTokens = subject.name.lowercased().split(separator: " ").map(String.init)
+        guard let df = docTokens.first, let dl = docTokens.last,
+              let sf = subjTokens.first, let sl = subjTokens.last else { return .mismatch }
+        return (df == sf && dl == sl && dob == subject.dob) ? .match : .mismatch
+    }
+    public static func extracted(data: Data) -> (name: String, dob: String)? {
+        guard let p = firstPatient(data), let (n, d) = nameAndDOB(p) else { return nil }
+        return (n, d)
+    }
+    private static func firstPatient(_ data: Data) -> ModelsR4.Patient? {
+        let dec = JSONDecoder()
+        if let bundle = try? dec.decode(ModelsR4.Bundle.self, from: data) {
+            return bundle.entry?.compactMap { $0.resource?.get(if: ModelsR4.Patient.self) }.first
+        }
+        return try? dec.decode(ModelsR4.Patient.self, from: data)
+    }
+    private static func nameAndDOB(_ p: ModelsR4.Patient) -> (String, String)? {
+        guard let hn = p.name?.first else { return nil }
+        let given = (hn.given ?? []).compactMap { $0.value?.string }.joined(separator: " ")
+        let family = hn.family?.value?.string ?? ""
+        let dob = p.birthDate?.value?.description ?? ""
+        return ("\(given) \(family)".trimmingCharacters(in: .whitespaces), dob)
     }
 }
 
@@ -1322,94 +1582,148 @@ public enum BridgeBuilder {
 struct HealthBridge: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "healthbridge",
-        abstract: "Parse a medical-record document into a validated Bridge Document.",
-        subcommands: [Parse.self]
-    )
+        abstract: "Parse medical-record documents into subject-bound Bridge Documents.",
+        subcommands: [Parse.self, Subject.self])
 }
 
 struct Parse: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Parse a FHIR R4 JSON file into *.bridge.json.")
+    @Argument(help: "Input FHIR JSON file.") var input: String
+    @Option(name: .long) var config: String = ConfigLoader.defaultPath
+    @Option(name: .long) var subject: String?
+    @Option(name: .long) var dataRoot: String?
+    @Flag(name: .long) var verbose = false
+    @Flag(name: .long) var quiet = false
+    @Flag(name: .long, help: "Proceed despite a Patient mismatch.") var force = false
+    @Flag(name: .long, help: "Proceed when the Patient is present but unverifiable.") var allowUnverifiedSubject = false
 
-    @Argument(help: "Path to the input FHIR JSON file.")
-    var input: String
-
-    @Option(name: .long, help: "Output path (default: <input>.bridge.json).")
-    var out: String?
-
-    @Option(name: .long, help: "Input format: auto or fhir.")
-    var format: String = "auto"
+    func validate() throws {
+        if verbose && quiet { throw ValidationError("--verbose and --quiet are mutually exclusive") }
+    }
 
     func run() throws {
+        let cfg = try ConfigLoader.load(path: config)
+        let overrides = Overrides(dataRoot: dataRoot, subject: subject,
+                                  logLevel: verbose ? .verbose : (quiet ? .quiet : nil))
+        let settings = SettingsResolver.resolve(config: cfg, overrides: overrides)
+        guard let entry = settings.selectedSubject else { throw Fail("no subject selected (set --subject or default_subject in config)") }
+
         let inputURL = URL(fileURLWithPath: input)
         let data = try Data(contentsOf: inputURL)
 
-        let doc = try BridgeBuilder.build(data: data, fileName: inputURL.lastPathComponent)
+        switch PatientMatch.check(data: data, subject: entry) {
+        case .match, .noPatient: break
+        case .mismatch:
+            if !force { throw Fail("Patient mismatch — refusing.\n\(mismatchDetail(data, entry))\nUse --force to override.") }
+        case .incomplete:
+            if !allowUnverifiedSubject { throw Fail("Patient present but unverifiable — refusing. Use --allow-unverified-subject to override.") }
+        }
+
+        let subjectRef = SubjectRef(id: entry.subjectId, label: entry.label,
+                                    hash: SubjectHash.make(name: entry.name, dob: entry.dob),
+                                    name: entry.name, dob: entry.dob)
+        let result = try BridgeBuilder.build(data: data, fileName: inputURL.lastPathComponent, subject: subjectRef)
+        let doc = result.document
 
         let issues = validate(doc)
-        for issue in issues {
-            FileHandle.standardError.write(Data("[\(issue.severity)] \(issue.message)\n".utf8))
-        }
-        if issues.contains(where: { $0.severity == .error }) {
-            throw ValidationFailed()
-        }
+        for i in issues { FileHandle.standardError.write(Data("[\(i.severity)] \(i.message)\n".utf8)) }
+        if issues.contains(where: { $0.severity == .error }) { throw Fail("validation failed") }
 
-        let outURL = out.map { URL(fileURLWithPath: $0) }
-            ?? inputURL.deletingPathExtension().appendingPathExtension("bridge.json")
-        try BridgeJSON.encoder.encode(doc).write(to: outURL)
+        let dir = settings.dataRoot.appendingPathComponent("subjects/\(entry.subjectId)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let out = dir.appendingPathComponent("\(doc.source.sha256).bridge.json")
+        try BridgeJSON.encoder.encode(doc).write(to: out)
 
-        let mapped = doc.observations.filter { $0.mapping != nil }.count
-        let unmapped = doc.observations.count - mapped
-        FileHandle.standardError.write(Data(
-            "Wrote \(outURL.lastPathComponent): \(doc.observations.count) observations, \(mapped) mapped, \(unmapped) unmapped.\n".utf8))
+        if settings.logLevel != .quiet {
+            let mapped = doc.observations.filter { $0.mapping != nil }.count
+            log("Wrote \(out.path): \(doc.observations.count) observations, \(mapped) mapped, \(doc.observations.count - mapped) unmapped, \(result.skipped.count) skipped.")
+            for o in doc.observations where o.mapping == nil {
+                log("  unmapped: \(o.code?.code ?? "—") \(o.name)")
+            }
+            for s in result.skipped { log("  skipped (\(s.reason)): \(s.label)") }
+        }
+        if doc.observations.isEmpty { throw ExitCode(2) }   // wrote an empty document
+    }
+
+    private func log(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
+    private func mismatchDetail(_ data: Data, _ entry: SubjectEntry) -> String {
+        let ext = PatientMatch.extracted(data: data)
+        return "  document: \(ext?.name ?? "?") / \(ext?.dob ?? "?")\n  roster:   \(entry.name) / \(entry.dob)"
     }
 }
 
-struct ValidationFailed: Error, CustomStringConvertible {
-    var description: String { "Bridge Document failed validation (see errors above)." }
+struct Subject: ParsableCommand {
+    static let configuration = CommandConfiguration(subcommands: [Add.self, List.self])
+
+    struct Add: ParsableCommand {
+        @Option(name: .long) var label: String
+        @Option(name: .long) var name: String
+        @Option(name: .long) var dob: String
+        @Option(name: .long, help: "Explicit roster key (defaults from label).") var key: String?
+        @Option(name: .long) var config: String = ConfigLoader.defaultPath
+        func run() throws {
+            var cfg = (try ConfigLoader.load(path: config)) ?? Config()
+            let resolvedKey = key ?? label.lowercased().replacingOccurrences(of: " ", with: "-")
+            let entry = SubjectEntry(key: resolvedKey, subjectId: UUID().uuidString, label: label, name: name, dob: dob)
+            do { try cfg.addSubject(entry) }
+            catch ConfigError.duplicateKey(let k) { throw Fail("Subject key '\(k)' already exists") }
+            try ConfigWriter.write(cfg, path: config)
+            print("Added subject '\(resolvedKey)' with subjectId \(entry.subjectId)")
+        }
+    }
+    struct List: ParsableCommand {
+        @Option(name: .long) var config: String = ConfigLoader.defaultPath
+        func run() throws {
+            let cfg = (try ConfigLoader.load(path: config)) ?? Config()
+            for s in cfg.subjects { print("\(s.key)\t\(s.label)\t\(s.subjectId)") }
+        }
+    }
 }
+
+struct Fail: Error, CustomStringConvertible { let m: String; init(_ m: String) { self.m = m }; var description: String { m } }
 ```
+Delete `Sources/healthbridge/main.swift`.
 
-Then delete the placeholder: `rm Sources/healthbridge/Placeholder.swift`.
+- [ ] **Step 5: Build then run to verify pass** — Run: `swift build` (produces the `healthbridge` binary the CLI tests exec), then `swift test --filter "BridgeBuilderTests|CLIRunTests"`. Expected: all PASS.
 
-- [ ] **Step 5: Run to verify pass**
-
-Run: `swift test --filter CLIIntegrationTests`
-Expected: both PASS.
-
-- [ ] **Step 6: Manual end-to-end smoke**
-
-Run:
+- [ ] **Step 6: Manual end-to-end**
 ```
-swift run healthbridge parse Tests/healthbridgeTests/Fixtures/bundle-vitals-and-labs.json --out /tmp/out.bridge.json
+swift run healthbridge subject add --label "Jane" --name "Jane Public" --dob 2000-01-01 --config /tmp/hb.toml
+swift run healthbridge parse Tests/healthbridgeTests/Fixtures/patient-bundle.json --subject jane --config /tmp/hb.toml --data-root /tmp/hbdata
 ```
-Expected: stderr prints `2 observations, 1 mapped, 1 unmapped`; `/tmp/out.bridge.json` exists and is valid JSON (verify with `swift run healthbridge parse … ` then inspect the file). Clean up `/tmp/out.bridge.json` after.
+Expected: subject added (prints a UUID); parse writes `/tmp/hbdata/subjects/<uuid>/<sha>.bridge.json`, prints the summary incl. unmapped lines. Clean up `/tmp/hb.toml` and `/tmp/hbdata` after.
 
-- [ ] **Step 7: Run the entire suite**
-
-Run: `swift test`
-Expected: every test in `BridgeKitTests`, `HealthBridgeParsingTests`, and `healthbridgeTests` PASSES.
+- [ ] **Step 7: Full suite** — Run: `swift test`. Expected: every test across all targets PASSES.
 
 - [ ] **Step 8: Commit**
-
 ```
-git add Package.swift Sources/healthbridge/HealthBridge.swift Tests/healthbridgeTests
+git add Package.swift Sources/healthbridge Tests/healthbridgeTests
 git rm Sources/healthbridge/main.swift
-git commit -m "feat(cli): healthbridge parse command producing validated Bridge Documents"
+github-agent-commit "feat(cli): parse + subject subcommands, cross-check, per-subject storage"
 ```
 
 ---
 
-## Self-Review (completed by plan author)
+## Self-Review (plan author)
 
-**Spec coverage:**
-- §2 schema → Task 2 (all types incl. `ObservationValue` enum, deterministic JSON). ✓
-- §3 BridgeKit (mapping table, `resolveMapping`, `deriveObservationID`, `validate`, platform-pure no-HealthKit-import) → Tasks 2–5; mapping table strings only, no HealthKit import. ✓
-- §4 CLI (`healthbridge parse`, parser abstraction, FHIR R4 JSON via `FHIRModels`, pre-resolve, validate, write, summary) → Tasks 6–8. ✓
-- §5 idempotency / stable ids → Task 3 + Task 7 (ids derived during parse). ✓
-- §6 testing (BridgeKit units, FHIRParser vs example resources, CLI integration, deterministic output) → Tasks 2–8; no network, no PHI. ✓
-- §7 resolved decisions (R4, JSON, FHIRModels, C-CDA→M2) → reflected; no C-CDA parser in this plan. ✓
-- §8 out of scope (iOS, HealthKit writes, PDF/LLM, transport, longitudinal merge) → none included. ✓
+**Spec coverage:** preflight/worktree (Task 0) · config + layered precedence + ConfigWriter + TOMLCodec (Task 2) · subject binding + content-based id + subject hash (Tasks 3–4) · mapping incl. UCUM variants (5) · hardened validation (6) · parser protocol with skips (7) · FHIR parse with BP components, UTC dates, lossless ids, drop-and-log (8) · CLI with cross-check tri-state, `--force`/`--allow-unverified-subject`, mutually-exclusive flags, duplicate-key rejection, unmapped+skip logging, zero-obs exit code, per-subject storage, and executable integration tests (9). Cross-file dedup now occurs via the content-based id; iOS device-binding gate, C-CDA, PDF/LLM remain out of scope.
 
-**Placeholder scan:** No "TBD"/"add error handling"/"similar to" left; every code step shows complete code. The two `FHIRModels` implementation notes point at *real* fallbacks driven by failing tests, not unfinished work.
+**Placeholder scan:** no TBD/"adjust if tests fail"/"similar to"; every code step has complete code. The lone real-API risk is `ModelsR4`'s `DateTime`/`FHIRTime` field shapes used in `FHIRDate` (e.g. `time.second` as `Decimal`, `date.month`/`day` as optional `UInt8`); the date-only and timestamp tests pin the behavior.
 
-**Type consistency:** `DocumentParser.parse(_:documentKey:)` signature is identical in Tasks 6, 7, 8. `MappingTable.resolve(loinc:value:unit:)`, `ObservationID.derive(...)`, `BridgeJSON.encoder/decoder`, `validate(_:)`, `BridgeDocument.currentSchemaVersion` are referenced consistently across tasks. `FHIRParser` leaves `mapping = nil`; the CLI (`BridgeBuilder`) is the sole place mapping is resolved — matches the single-responsibility split asserted in Task 7's test (`XCTAssertNil(o.mapping)`).
+**Type consistency:** `DocumentParser.parse(_:subjectId:)` identical across Tasks 7–9. `ObservationID.derive(subjectId:…)` content-based, used by `FHIRParser.build` and asserted in Task 4. `BridgeBuilder.build(data:fileName:subject:now:) -> BuildResult` (clock injected) used by the CLI and Task 9 tests. `PatientMatchResult` enum drives the CLI's `--force`/`--allow-unverified-subject` policy. `SubjectRef` (document) vs `SubjectEntry` (roster) distinct by design; the roster entry resolves into the document's `SubjectRef`. `Config.addSubject`/`ConfigError.duplicateKey`, `ConfigWriter.write`, `TOMLCodec`, `MappingTable.resolve`, `SubjectHash.make`, `validate` referenced consistently.
+
+---
+
+## Risk Mitigations (Pre-Mortem)
+
+**Run:** 2026-06-23, deep mode, on this plan. **Tigers:** 2 · **Elephants:** 2.
+
+### Tigers addressed
+1. **Real patient identity in committed fixtures (HIGH).** All fixtures/tests originally used a real person's name + DOB on a public repo. *Mitigation:* scrubbed every identity to synthetic ("Jane Public" / "John Sample", DOB `2000-01-01`/`1980-06-15`) across plan and spec; added a content-scanning denylist gate to **Task 0 Step 4(b)**, to be re-run before any fixture commit. Filename-only PHI checks do not catch this.
+2. **Teammate commit environment (MEDIUM).** `GITHUB_APP_*` may not direnv-load in a worktree subdir / fresh teammate shell. *Mitigation:* commit-protocol now requires each executor to run the Task 0 Step 2 env check **in the shell it commits from**, before its first `github-agent-commit`.
+
+### Accepted risks (elephants)
+3. **M1 cannot process the operator's real records (HIGH, accepted).** Real source data is C-CDA (Privia) + PDF (Piedmont); M1 ingests FHIR R4 JSON only. M1 is the foundation + FHIR path; real-document utility arrives with **M2 (C-CDA)**. Accepted as deliberate lowest-risk-first sequencing.
+4. **HealthKit write is deferred/undemonstrated (MEDIUM, accepted).** The endgame (data into Apple Health) lives in the later iOS writer. Accepted because third-party `HKQuantityType` writes are a known-supported API; a write spike can de-risk before the iOS milestone if desired.
+
+### Paper tigers (no action)
+- `FHIRDate`/TOMLKit API spellings — isolated (adapter) + TDD-caught. · BP systolic/diastolic mapping — fixed by Task 8 component handling. · Double JSON parse — perf only, small documents.
