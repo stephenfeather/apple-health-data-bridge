@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <recordTarget><patientRole><patient>
+    <name><given>Jane</given><family>Public</family></name><birthTime value="20000101"/>
+  </patient></patientRole></recordTarget>
+  <component><structuredBody><component>
+    <section>
+      <code code="8716-3" codeSystem="2.16.840.1.113883.6.1" displayName="Vital Signs"/>
+      <entry>
+        <organizer classCode="CLUSTER" moodCode="EVN">
+          <code code="46680-4" codeSystem="2.16.840.1.113883.6.1" displayName="Vital signs"/>
+          <component>
+            <observation classCode="OBS" moodCode="EVN">
+              <code code="8480-6" codeSystem="2.16.840.1.113883.6.1" displayName="Systolic BP"/>
+              <effectiveTime value="20250319093000+0000"/>
+              <value xsi:type="PQ" value="120" unit="mm[Hg]"/>
+            </observation>
+          </component>
+          <component>
+            <observation classCode="OBS" moodCode="EVN">
+              <code code="8462-4" codeSystem="2.16.840.1.113883.6.1" displayName="Diastolic BP"/>
+              <effectiveTime value="20250319093000+0000"/>
+              <value xsi:type="PQ" value="80" unit="mm[Hg]"/>
+            </observation>
+          </component>
+        </organizer>
+      </entry>
+    </section>
+  </component></structuredBody></component>
+</ClinicalDocument>

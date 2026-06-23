@@ -80,5 +80,26 @@ final class CCDAParserTests: XCTestCase {
             }
         }
     }
+    // MARK: Vital Signs — BP organizer + empty/non-LOINC handling
+    func testBPOrganizerYieldsTwoMappableComponents() throws {
+        let r = try parse("ccda-vitals")
+        // Adversarial: exactly TWO observations — the outer organizer code 46680-4 must NOT leak in.
+        XCTAssertEqual(r.observations.count, 2)
+        let codes = Set(r.observations.compactMap { $0.code?.code })
+        XCTAssertEqual(codes, ["8480-6", "8462-4"])
+        XCTAssertFalse(codes.contains("46680-4"))
+        for o in r.observations where ["8480-6", "8462-4"].contains(o.code?.code) {
+            XCTAssertNotNil(MappingTable.resolve(loinc: o.code?.code, value: o.value, unit: o.unit))
+        }
+    }
+    func testEmptySectionYieldsNothing() throws {
+        let r = try parse("ccda-empty-section")
+        XCTAssertEqual(r.observations.count, 0); XCTAssertEqual(r.skipped.count, 0)
+    }
+    func testNonLOINCCodeIsSkippedNoCode() throws {
+        let r = try parse("ccda-no-loinc")
+        XCTAssertEqual(r.observations.count, 0)
+        XCTAssertEqual(r.skipped.first?.reason, .noCode)
+    }
 }
 #endif
