@@ -699,7 +699,7 @@ github-agent-commit "feat(bridgekit): LOINC to HealthKit mapping table with unit
 
 **Interfaces:**
 - Consumes: `BridgeDocument`, `Observation` from Task 2.
-- Produces: `struct ValidationIssue { let severity: Severity; let message: String }` with `enum Severity { case error, warning }`, and `func validate(_ document: BridgeDocument) -> [ValidationIssue]` (free function in `BridgeKit`). Rules: schemaVersion must equal current → error; empty `source.sha256` → error; duplicate observation ids → error; any observation with `confidence` outside `0...1` → error; an observation whose `mapping != nil` but `value` is `.string` → error; zero observations → warning.
+- Produces: `struct ValidationIssue { let severity: Severity; let message: String }` with `enum Severity { case error, warning }`, and `func validate(_ document: BridgeDocument) -> [ValidationIssue]` (free function in `BridgeKit`). Rules: schemaVersion must equal current → error; empty `source.sha256` → error; duplicate observation ids → error; any observation with `confidence` outside `0...1` → error; an observation whose `mapping != nil` but `value` is `.string` → error; zero observations → warning. The duplicate-id rule stays an `error` but functions as a **backstop**: `BridgeBuilder` (Task 8) dedupes by id before validating, so in normal operation no duplicates reach the validator — a surviving duplicate signals a real bug.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1208,6 +1208,7 @@ github-agent-commit "feat(parsing): FHIR R4 JSON parser for Observation and Bund
 - Create: `Sources/healthbridge/HealthBridge.swift`
 - Delete: `Sources/healthbridge/main.swift` (the Task 1 entry-point stub — replaced by `HealthBridge.swift`'s `@main`)
 - Create: `Tests/healthbridgeTests/Fixtures/bundle-vitals-and-labs.json` (copy of the Task 7 fixture)
+- Create: `Tests/healthbridgeTests/Fixtures/bundle-duplicate.json` (same observation twice, for the dedupe test)
 - Test: `Tests/healthbridgeTests/CLIIntegrationTests.swift`
 
 **Interfaces:**
@@ -1230,6 +1231,35 @@ Then copy the Task 7 fixture so the CLI test has its own resource:
 mkdir -p Tests/healthbridgeTests/Fixtures
 cp Tests/HealthBridgeParsingTests/Fixtures/bundle-vitals-and-labs.json Tests/healthbridgeTests/Fixtures/bundle-vitals-and-labs.json
 ```
+
+Also create `Tests/healthbridgeTests/Fixtures/bundle-duplicate.json` — the same body-weight observation twice, so the dedupe test has input that collapses to one:
+```json
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Observation", "id": "bw1", "status": "final",
+        "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
+        "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+        "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+        "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation", "id": "bw1-dup", "status": "final",
+        "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
+        "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+        "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+        "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" }
+      }
+    }
+  ]
+}
+```
+> Note the two entries use different FHIR resource `id`s (`bw1`/`bw1-dup`) but the SAME clinical content — our `ObservationID` derives from code+date+value+unit+documentKey, not the FHIR resource id, so both collapse to one Bridge observation.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -1270,6 +1300,14 @@ final class CLIIntegrationTests: XCTestCase {
         let b = try BridgeJSON.encoder.encode(BridgeBuilder.build(data: data, fileName: "f.json"))
         XCTAssertEqual(a, b)
     }
+
+    func testDeduplicatesIdenticalObservations() throws {
+        let data = try fixture("bundle-duplicate")
+        let doc = try BridgeBuilder.build(data: data, fileName: "bundle-duplicate.json")
+        // Two FHIR entries, identical clinical content -> one Bridge observation.
+        XCTAssertEqual(doc.observations.count, 1)
+        XCTAssertFalse(validate(doc).contains { $0.severity == .error })
+    }
 }
 ```
 
@@ -1302,13 +1340,20 @@ public enum BridgeBuilder {
             return o
         }
 
+        // Dedupe by id: identical observations (same code+date+value+unit -> same id) collapse
+        // to one, so a report that restates a value imports once. Keeps first occurrence,
+        // preserving order. This is the per-file idempotency behavior (spec §5); the validator's
+        // duplicate-id error is then only a backstop for a bug that slips a dup past here.
+        var seenIDs = Set<String>()
+        let deduped = resolved.filter { seenIDs.insert($0.id).inserted }
+
         let doc = BridgeDocument(
             schemaVersion: BridgeDocument.currentSchemaVersion,
             source: Source(kind: .fhir, fileName: fileName, sha256: sha,
                            extractedAt: Date(),
                            extractor: Extractor(engine: "fhir-parser", version: "0.1.0")),
             subject: nil,
-            observations: resolved
+            observations: deduped
         )
         return doc
     }
