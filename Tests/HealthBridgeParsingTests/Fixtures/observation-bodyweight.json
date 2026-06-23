@@ -1,0 +1,5 @@
+{ "resourceType": "Observation", "id": "bw1", "status": "final",
+  "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
+  "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ], "text": "Body weight" },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+  "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } }

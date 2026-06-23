@@ -1,0 +1,6 @@
+{ "resourceType": "Observation", "id": "lf1", "status": "final",
+  "code": { "coding": [
+    { "system": "http://example.org/local", "code": "WT", "display": "Weight (local)" },
+    { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+  "valueQuantity": { "value": 72.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } }

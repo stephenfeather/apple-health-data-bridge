@@ -1,0 +1,4 @@
+{ "resourceType": "Observation", "id": "nc1", "status": "final",
+  "code": { "text": "Free text only" },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+  "valueQuantity": { "value": 1, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } }

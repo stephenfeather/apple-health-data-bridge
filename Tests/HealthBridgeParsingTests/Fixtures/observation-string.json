@@ -1,0 +1,4 @@
+{ "resourceType": "Observation", "id": "s1", "status": "final",
+  "code": { "coding": [ { "system": "http://loinc.org", "code": "12345-6", "display": "Note" } ] },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+  "valueString": "positive" }

@@ -1,0 +1,4 @@
+{ "resourceType": "Observation", "id": "hv1", "status": "final",
+  "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+  "effectiveDateTime": "2025-03-19T09:30:00-04:00",
+  "valueQuantity": { "value": 1e20, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } }
