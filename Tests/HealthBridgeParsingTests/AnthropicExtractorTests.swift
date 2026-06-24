@@ -54,6 +54,33 @@ final class AnthropicExtractorTests: XCTestCase {
         XCTAssertFalse(result.observations.isEmpty)
     }
 
+    /// #3 — additive observability: token usage + stop_reason captured from the envelope.
+    func testParseEnvelopeCapturesUsageAndStopReason() throws {
+        let raw = try AnthropicExtractor.parseEnvelope(try fixtureData("anthropic-envelope"))
+        let meta = try XCTUnwrap(raw.meta, "meta must be present when usage/stop_reason exist")
+        XCTAssertEqual(meta.inputTokens, 12)
+        XCTAssertEqual(meta.outputTokens, 48)
+        XCTAssertEqual(meta.stopReason, "end_turn")
+    }
+
+    /// #3 — truncation signal flows through verbatim (no behavior change, just observed).
+    func testParseEnvelopeCapturesTruncationStopReason() throws {
+        let raw = try AnthropicExtractor.parseEnvelope(try fixtureData("anthropic-envelope-truncated"))
+        let meta = try XCTUnwrap(raw.meta)
+        XCTAssertEqual(meta.stopReason, "max_tokens")
+        XCTAssertEqual(meta.outputTokens, 4096)
+        // jsonText is STILL extracted normally — meta is purely additive, never gates extraction.
+        XCTAssertTrue(raw.jsonText.hasPrefix("{"))
+    }
+
+    /// #3 — absent meta yields nil meta, never an error; jsonText still extracted.
+    func testParseEnvelopeWithoutMetaYieldsNilMetaButStillExtracts() throws {
+        let raw = try AnthropicExtractor.parseEnvelope(try fixtureData("anthropic-envelope-no-meta"))
+        XCTAssertNil(raw.meta, "no usage/stop_reason → meta nil")
+        XCTAssertTrue(raw.jsonText.hasPrefix("{"))
+        XCTAssertTrue(raw.jsonText.contains("observations") || raw.jsonText.contains("loinc"))
+    }
+
     func testMalformedEnvelopeThrows() throws {
         XCTAssertThrowsError(try AnthropicExtractor.parseEnvelope(Data("{}".utf8))) {
             guard case LLMError.malformedResponse = $0 else { return XCTFail("expected .malformedResponse") }

@@ -122,7 +122,20 @@ public struct AnthropicExtractor: LLMExtractor {
               let text = first["text"] as? String else {
             throw LLMError.malformedResponse("unexpected Anthropic envelope shape")
         }
-        return LLMRawResponse(jsonText: text.trimmingCharacters(in: .whitespacesAndNewlines))
+        return LLMRawResponse(jsonText: text.trimmingCharacters(in: .whitespacesAndNewlines),
+                              meta: parseMeta(obj))
+    }
+
+    /// PURE, best-effort (#3): top-level `usage.{input_tokens,output_tokens}` + `stop_reason`.
+    /// Tolerant — absent/wrong-shaped fields become nil; returns nil if NO signal is present.
+    /// Never throws; meta is observability, it never gates extraction.
+    static func parseMeta(_ obj: [String: Any]) -> LLMResponseMeta? {
+        let usage = obj["usage"] as? [String: Any]
+        let inputTokens = usage?["input_tokens"] as? Int
+        let outputTokens = usage?["output_tokens"] as? Int
+        let stopReason = obj["stop_reason"] as? String
+        guard inputTokens != nil || outputTokens != nil || stopReason != nil else { return nil }
+        return LLMResponseMeta(inputTokens: inputTokens, outputTokens: outputTokens, stopReason: stopReason)
     }
 
     public func extract(_ request: LLMRequest) async throws -> LLMRawResponse {

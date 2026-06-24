@@ -15,7 +15,8 @@ final class PDFExtractorTests: XCTestCase {
     /// In-file mock — returns canned JSON, never touches the network or a real key.
     struct MockLLMExtractor: LLMExtractor {
         let reply: String
-        func extract(_ request: LLMRequest) async throws -> LLMRawResponse { .init(jsonText: reply) }
+        var meta: LLMResponseMeta? = nil
+        func extract(_ request: LLMRequest) async throws -> LLMRawResponse { .init(jsonText: reply, meta: meta) }
     }
     struct ThrowingLLMExtractor: LLMExtractor {
         let error: LLMError
@@ -76,6 +77,25 @@ final class PDFExtractorTests: XCTestCase {
         let vital = try XCTUnwrap(extraction.result.observations.first { $0.category == .vital })
         XCTAssertEqual(vital.confidence, 0.9, accuracy: 1e-9)   // model confidence flows through
         XCTAssertEqual(extraction.extractedPatient?.name, "Jane Public")   // surfaced for CLI gating
+    }
+
+    /// #3 — provider response meta threads up through PDFExtraction for the CLI verbose log.
+    func testMetaThreadsThroughToExtraction() async throws {
+        let meta = LLMResponseMeta(inputTokens: 12, outputTokens: 48, stopReason: "end_turn")
+        let mock = MockLLMExtractor(reply: try fixtureText("llm-response-valid"), meta: meta)
+        let extraction = try await PDFExtractor(extractor: mock, model: "m")
+            .extractDocument(try fixture("pdf-minimal", "pdf"), subjectId: "s")
+        XCTAssertEqual(extraction.meta?.inputTokens, 12)
+        XCTAssertEqual(extraction.meta?.outputTokens, 48)
+        XCTAssertEqual(extraction.meta?.stopReason, "end_turn")
+    }
+
+    /// #3 — when the extractor returns no meta, extraction.meta is nil (additive, no failure).
+    func testNilMetaThreadsThroughAsNil() async throws {
+        let mock = MockLLMExtractor(reply: try fixtureText("llm-response-valid"))
+        let extraction = try await PDFExtractor(extractor: mock, model: "m")
+            .extractDocument(try fixture("pdf-minimal", "pdf"), subjectId: "s")
+        XCTAssertNil(extraction.meta)
     }
 }
 #endif

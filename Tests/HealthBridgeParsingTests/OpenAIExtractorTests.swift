@@ -33,6 +33,32 @@ final class OpenAIExtractorTests: XCTestCase {
         XCTAssertFalse(result.observations.isEmpty)
     }
 
+    /// #3 — additive observability: prompt/completion tokens + finish_reason captured.
+    func testParseEnvelopeCapturesUsageAndFinishReason() throws {
+        let raw = try OpenAIExtractor.parseEnvelope(try fixtureData("openai-envelope"))
+        let meta = try XCTUnwrap(raw.meta, "meta must be present when usage/finish_reason exist")
+        XCTAssertEqual(meta.inputTokens, 12)      // prompt_tokens → inputTokens
+        XCTAssertEqual(meta.outputTokens, 48)     // completion_tokens → outputTokens
+        XCTAssertEqual(meta.stopReason, "stop")   // finish_reason → stopReason
+    }
+
+    /// #3 — truncation signal (finish_reason "length") flows through verbatim.
+    func testParseEnvelopeCapturesTruncationFinishReason() throws {
+        let raw = try OpenAIExtractor.parseEnvelope(try fixtureData("openai-envelope-truncated"))
+        let meta = try XCTUnwrap(raw.meta)
+        XCTAssertEqual(meta.stopReason, "length")
+        XCTAssertEqual(meta.outputTokens, 4096)
+        XCTAssertTrue(raw.jsonText.hasPrefix("{"))
+    }
+
+    /// #3 — absent meta yields nil meta, never an error; jsonText still extracted.
+    func testParseEnvelopeWithoutMetaYieldsNilMetaButStillExtracts() throws {
+        let raw = try OpenAIExtractor.parseEnvelope(try fixtureData("openai-envelope-no-meta"))
+        XCTAssertNil(raw.meta, "no usage/finish_reason → meta nil")
+        XCTAssertTrue(raw.jsonText.hasPrefix("{"))
+        XCTAssertTrue(raw.jsonText.contains("observations") || raw.jsonText.contains("loinc"))
+    }
+
     func testMalformedEnvelopeThrows() throws {
         XCTAssertThrowsError(try OpenAIExtractor.parseEnvelope(Data("{}".utf8))) {
             guard case LLMError.malformedResponse = $0 else { return XCTFail("expected .malformedResponse") }
