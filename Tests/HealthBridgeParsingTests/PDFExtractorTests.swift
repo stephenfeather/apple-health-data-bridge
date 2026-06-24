@@ -97,5 +97,14 @@ final class PDFExtractorTests: XCTestCase {
             .extractDocument(try fixture("pdf-minimal", "pdf"), subjectId: "s")
         XCTAssertNil(extraction.meta)
     }
+
+    /// #4 — the model's raw reply text is surfaced verbatim on PDFExtraction for the eval log.
+    func testRawResponseThreadsThroughToExtraction() async throws {
+        let reply = try fixtureText("llm-response-valid")
+        let mock = MockLLMExtractor(reply: reply)
+        let extraction = try await PDFExtractor(extractor: mock, model: "m")
+            .extractDocument(try fixture("pdf-minimal", "pdf"), subjectId: "s")
+        XCTAssertEqual(extraction.rawResponse, reply)
+    }
 }
 #endif

@@ -72,6 +72,16 @@ final class PDFBuildCLITests: XCTestCase {
         XCTAssertEqual(out.extractedPatient?.name, "Jane Public")
         XCTAssertEqual(out.extractedPatient?.dob, "2000-01-01")
     }
+
+    /// #4 — buildPDF carries the model's raw reply text up for the eval log (named-tuple, additive).
+    func testBuildPDFSurfacesRawResponse() async throws {
+        let reply = try fixtureText("llm-response-valid")
+        let mock = MockLLMExtractor(reply: reply)
+        let out = try await BridgeBuilder.buildPDF(
+            data: try fixture("pdf-patient", "pdf"), fileName: "p.pdf", subject: subject,
+            extractor: mock, engine: "anthropic-llm", model: "m", now: fixedNow)
+        XCTAssertEqual(out.rawResponse, reply)
+    }
 }
 #endif
 

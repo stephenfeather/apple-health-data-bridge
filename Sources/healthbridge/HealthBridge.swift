@@ -84,7 +84,7 @@ extension BridgeBuilder {
                          extractor: any LLMExtractor, engine: String, model: String,
                          subjectDOB: Date? = nil, now: Date = Date())
         async throws -> (result: BuildResult, extractedPatient: (name: String, dob: String)?,
-                         meta: LLMResponseMeta?) {
+                         meta: LLMResponseMeta?, rawResponse: String) {
         let sha = sha256Hex(data)
         let extraction = try await PDFExtractor(extractor: extractor, model: model)
             .extractDocument(data, subjectId: subject.id, subjectDOB: subjectDOB, now: now)
@@ -101,7 +101,7 @@ extension BridgeBuilder {
                            extractor: Extractor(engine: engine, version: "0.1.0")),
             subject: subject, observations: deduped)
         return (BuildResult(document: doc, skipped: extraction.result.skipped),
-                extraction.extractedPatient, extraction.meta)
+                extraction.extractedPatient, extraction.meta, extraction.rawResponse)
     }
 }
 #endif
@@ -191,6 +191,9 @@ struct Parse: AsyncParsableCommand {
     @ArgumentParser.Flag(name: .long) var quiet = false
     @ArgumentParser.Flag(name: .long, help: "Proceed despite a Patient mismatch.") var force = false
     @ArgumentParser.Flag(name: .long, help: "Proceed when the Patient is present but unverifiable.") var allowUnverifiedSubject = false
+    // #4: opt-in PHI-safe raw-response logging for offline eval. Also enabled by
+    // HEALTHBRIDGE_LOG_RAW_RESPONSES=1|true or config raw_response_log=true. OFF by default.
+    @ArgumentParser.Flag(name: .long, help: "PDF only: append the model's raw response to a local eval log (off by default).") var logRawResponses = false
 
     func validate() throws {
         if verbose && quiet { throw ValidationError("--verbose and --quiet are mutually exclusive") }
@@ -210,20 +213,30 @@ struct Parse: AsyncParsableCommand {
         // is async/non-conforming to the sync DocumentParser). A key is required ONLY on this branch.
         #if canImport(PDFKit) && os(macOS)
         if PDFExtractor.canParse(data) {
-            let (result, extractedPatient, meta) = try await buildFromPDF(
+            let pdf = try await buildFromPDF(
                 data: data, fileName: inputURL.lastPathComponent, entry: entry)
             // Single-subject binding parity (HIGH): verify the model-extracted patient against the bound
             // subject with the SAME comparator + gating as FHIR/C-CDA. No document is written on refusal.
-            let match = extractedPatient.map { PatientMatch.compare(name: $0.name, dob: $0.dob, subject: entry) } ?? .noPatient
-            let detail = "  document: \(extractedPatient?.name ?? "?") / \(extractedPatient?.dob ?? "?")\n  roster:   \(entry.name) / \(entry.dob)"
+            let match = pdf.extractedPatient.map { PatientMatch.compare(name: $0.name, dob: $0.dob, subject: entry) } ?? .noPatient
+            let detail = "  document: \(pdf.extractedPatient?.name ?? "?") / \(pdf.extractedPatient?.dob ?? "?")\n  roster:   \(entry.name) / \(entry.dob)"
             if case .refuse(let message) = subjectGate(match, force: force, allowUnverified: allowUnverifiedSubject, detail: detail) {
                 throw Fail(message)
             }
             // #3 additive observability: only on --verbose, only the PDF/LLM path. Key-free.
-            if settings.logLevel == .verbose, let meta {
+            if settings.logLevel == .verbose, let meta = pdf.meta {
                 log(llmUsageLine(meta))
             }
-            try finalize(result, entry: entry, settings: settings)
+            try finalize(pdf.result, entry: entry, settings: settings)
+            // #4 raw-response eval log: only AFTER a kept extraction is finalized (never on refusal/throw),
+            // and only when opt-in (flag || env || config). Content-SHA only — no page/prompt text, no key.
+            if rawLoggingEnabled(flag: logRawResponses,
+                                 env: ProcessInfo.processInfo.environment,
+                                 config: cfg?.rawResponseLog ?? false) {
+                writeRawResponseLog(sha: pdf.result.document.source.sha256,
+                                    provider: pdf.provider, model: pdf.model,
+                                    meta: pdf.meta, rawResponse: pdf.rawResponse,
+                                    settings: settings, logPathOverride: cfg?.rawResponseLogPath)
+            }
             return
         }
         #endif
@@ -255,7 +268,7 @@ struct Parse: AsyncParsableCommand {
     /// chosen adapter, and run the async PDF extraction. The key lives in memory only.
     private func buildFromPDF(data: Data, fileName: String, entry: SubjectEntry)
         async throws -> (result: BuildResult, extractedPatient: (name: String, dob: String)?,
-                         meta: LLMResponseMeta?) {
+                         meta: LLMResponseMeta?, rawResponse: String, provider: Provider, model: String) {
         let resolvedProvider = try resolveProvider(flag: provider)
         guard let key = resolveAPIKey(flag: apiKey, provider: resolvedProvider,
                                       env: ProcessInfo.processInfo.environment) else {
@@ -271,9 +284,11 @@ struct Parse: AsyncParsableCommand {
         // Verified roster DOB (not the model's untrusted patients[].dob) for the plausible-date guard,
         // parsed with the decoder's identical UTC discipline.
         let subjectDOB = LLMResponseContract.parseDate(entry.dob)
-        return try await BridgeBuilder.buildPDF(data: data, fileName: fileName, subject: subjectRef,
-                                                extractor: extractor, engine: resolvedProvider.engine,
-                                                model: modelId, subjectDOB: subjectDOB)
+        let built = try await BridgeBuilder.buildPDF(data: data, fileName: fileName, subject: subjectRef,
+                                                     extractor: extractor, engine: resolvedProvider.engine,
+                                                     model: modelId, subjectDOB: subjectDOB)
+        return (built.result, built.extractedPatient, built.meta, built.rawResponse,
+                resolvedProvider, modelId)
     }
     #endif
 
@@ -301,6 +316,22 @@ struct Parse: AsyncParsableCommand {
     }
 
     private func log(_ s: String) { try? FileHandle.standardError.write(contentsOf: Data((s + "\n").utf8)) }
+
+    /// #4 CLI edge: encode + append the raw-response eval-log entry. Provider name is the enum
+    /// rawValue ("anthropic"/"openai"); apiVersion is the Anthropic header for Anthropic, nil for
+    /// OpenAI. Failures to write are non-fatal (best-effort observability) and surfaced to stderr.
+    private func writeRawResponseLog(sha: String, provider: Provider, model: String,
+                                     meta: LLMResponseMeta?, rawResponse: String,
+                                     settings: Settings, logPathOverride: String?) {
+        let apiVersion = provider == .anthropic ? AnthropicExtractor.anthropicVersion : nil
+        let entry = RawResponseLog.encodeEntry(
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            contentSHA256: sha, provider: provider.rawValue, model: model,
+            apiVersion: apiVersion, meta: meta, rawResponse: rawResponse)
+        let url = rawResponseLogURL(dataRoot: settings.dataRoot, override: logPathOverride)
+        do { try RawResponseLog.append(entry: entry, to: url) }
+        catch { log("warning: could not write raw-response log at \(url.path): \(error)") }
+    }
 
     /// Pure: format the one-line LLM usage summary for --verbose. Nil fields render as "—".
     /// PDF/LLM path only; never printed at .normal/.quiet; carries no key.
