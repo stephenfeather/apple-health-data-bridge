@@ -83,7 +83,8 @@ extension BridgeBuilder {
     static func buildPDF(data: Data, fileName: String, subject: SubjectRef,
                          extractor: any LLMExtractor, engine: String, model: String,
                          subjectDOB: Date? = nil, now: Date = Date())
-        async throws -> (result: BuildResult, extractedPatient: (name: String, dob: String)?) {
+        async throws -> (result: BuildResult, extractedPatient: (name: String, dob: String)?,
+                         meta: LLMResponseMeta?) {
         let sha = sha256Hex(data)
         let extraction = try await PDFExtractor(extractor: extractor, model: model)
             .extractDocument(data, subjectId: subject.id, subjectDOB: subjectDOB, now: now)
@@ -99,7 +100,8 @@ extension BridgeBuilder {
             source: Source(kind: .pdf, fileName: fileName, sha256: sha, extractedAt: now,
                            extractor: Extractor(engine: engine, version: "0.1.0")),
             subject: subject, observations: deduped)
-        return (BuildResult(document: doc, skipped: extraction.result.skipped), extraction.extractedPatient)
+        return (BuildResult(document: doc, skipped: extraction.result.skipped),
+                extraction.extractedPatient, extraction.meta)
     }
 }
 #endif
@@ -208,7 +210,7 @@ struct Parse: AsyncParsableCommand {
         // is async/non-conforming to the sync DocumentParser). A key is required ONLY on this branch.
         #if canImport(PDFKit) && os(macOS)
         if PDFExtractor.canParse(data) {
-            let (result, extractedPatient) = try await buildFromPDF(
+            let (result, extractedPatient, meta) = try await buildFromPDF(
                 data: data, fileName: inputURL.lastPathComponent, entry: entry)
             // Single-subject binding parity (HIGH): verify the model-extracted patient against the bound
             // subject with the SAME comparator + gating as FHIR/C-CDA. No document is written on refusal.
@@ -216,6 +218,10 @@ struct Parse: AsyncParsableCommand {
             let detail = "  document: \(extractedPatient?.name ?? "?") / \(extractedPatient?.dob ?? "?")\n  roster:   \(entry.name) / \(entry.dob)"
             if case .refuse(let message) = subjectGate(match, force: force, allowUnverified: allowUnverifiedSubject, detail: detail) {
                 throw Fail(message)
+            }
+            // #3 additive observability: only on --verbose, only the PDF/LLM path. Key-free.
+            if settings.logLevel == .verbose, let meta {
+                log(llmUsageLine(meta))
             }
             try finalize(result, entry: entry, settings: settings)
             return
@@ -248,7 +254,8 @@ struct Parse: AsyncParsableCommand {
     /// Resolve provider (default Anthropic — D1) + key (flag/env; required here only) + model, build the
     /// chosen adapter, and run the async PDF extraction. The key lives in memory only.
     private func buildFromPDF(data: Data, fileName: String, entry: SubjectEntry)
-        async throws -> (result: BuildResult, extractedPatient: (name: String, dob: String)?) {
+        async throws -> (result: BuildResult, extractedPatient: (name: String, dob: String)?,
+                         meta: LLMResponseMeta?) {
         let resolvedProvider = try resolveProvider(flag: provider)
         guard let key = resolveAPIKey(flag: apiKey, provider: resolvedProvider,
                                       env: ProcessInfo.processInfo.environment) else {
@@ -294,6 +301,13 @@ struct Parse: AsyncParsableCommand {
     }
 
     private func log(_ s: String) { try? FileHandle.standardError.write(contentsOf: Data((s + "\n").utf8)) }
+
+    /// Pure: format the one-line LLM usage summary for --verbose. Nil fields render as "—".
+    /// PDF/LLM path only; never printed at .normal/.quiet; carries no key.
+    private func llmUsageLine(_ meta: LLMResponseMeta) -> String {
+        func f(_ v: Int?) -> String { v.map(String.init) ?? "—" }
+        return "LLM usage: input=\(f(meta.inputTokens)) output=\(f(meta.outputTokens)) stop=\(meta.stopReason ?? "—")"
+    }
     private func mismatchDetail(_ data: Data, _ entry: SubjectEntry) -> String {
         let ext = PatientMatch.extracted(data: data)
         return "  document: \(ext?.name ?? "?") / \(ext?.dob ?? "?")\n  roster:   \(entry.name) / \(entry.dob)"

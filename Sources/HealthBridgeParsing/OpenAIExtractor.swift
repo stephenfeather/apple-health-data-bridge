@@ -68,7 +68,20 @@ public struct OpenAIExtractor: LLMExtractor {
               let content = message["content"] as? String else {
             throw LLMError.malformedResponse("unexpected OpenAI envelope shape")
         }
-        return LLMRawResponse(jsonText: content.trimmingCharacters(in: .whitespacesAndNewlines))
+        return LLMRawResponse(jsonText: content.trimmingCharacters(in: .whitespacesAndNewlines),
+                              meta: parseMeta(obj, firstChoice: first))
+    }
+
+    /// PURE, best-effort (#3): top-level `usage.{prompt_tokens→input,completion_tokens→output}` +
+    /// `choices[0].finish_reason`. Tolerant — absent fields become nil; returns nil if NO signal.
+    /// Never throws; meta is observability, it never gates extraction.
+    static func parseMeta(_ obj: [String: Any], firstChoice: [String: Any]) -> LLMResponseMeta? {
+        let usage = obj["usage"] as? [String: Any]
+        let inputTokens = usage?["prompt_tokens"] as? Int
+        let outputTokens = usage?["completion_tokens"] as? Int
+        let stopReason = firstChoice["finish_reason"] as? String
+        guard inputTokens != nil || outputTokens != nil || stopReason != nil else { return nil }
+        return LLMResponseMeta(inputTokens: inputTokens, outputTokens: outputTokens, stopReason: stopReason)
     }
 
     public func extract(_ request: LLMRequest) async throws -> LLMRawResponse {

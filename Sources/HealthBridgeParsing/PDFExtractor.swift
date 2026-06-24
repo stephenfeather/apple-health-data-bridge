@@ -44,9 +44,10 @@ public struct PDFExtractor {
         }
         let patient = try LLMResponseContract.extractedPatient(raw.jsonText)
         // subjectDOB (verified roster DOB) + now drive the plausible-date guard inside decode.
+        // deferred (#3): truncation-as-error
         let result = try LLMResponseContract.decode(raw.jsonText, subjectId: subjectId,
                                                     subjectDOB: subjectDOB, now: now)   // ParseError on malformed
-        return PDFExtraction(result: result, extractedPatient: patient)
+        return PDFExtraction(result: result, extractedPatient: patient, meta: raw.meta)
     }
     #endif
 }
@@ -56,8 +57,12 @@ public struct PDFExtractor {
 public struct PDFExtraction {
     public let result: ParseResult
     public let extractedPatient: (name: String, dob: String)?
-    public init(result: ParseResult, extractedPatient: (name: String, dob: String)?) {
+    /// Provider response meta (#3) — additive observability for the CLI verbose log; nil when absent.
+    public let meta: LLMResponseMeta?
+    public init(result: ParseResult, extractedPatient: (name: String, dob: String)?,
+                meta: LLMResponseMeta? = nil) {
         self.result = result
         self.extractedPatient = extractedPatient
+        self.meta = meta
     }
 }

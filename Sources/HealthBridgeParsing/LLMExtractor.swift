@@ -22,11 +22,25 @@ public struct LLMRequest: Sendable, Equatable {
     }
 }
 
+/// Provider response metadata (additive observability): token usage + stop/finish reason.
+/// All fields optional — absent/unparseable envelope metadata yields nil, never an error.
+public struct LLMResponseMeta: Sendable, Equatable {
+    public let inputTokens: Int?
+    public let outputTokens: Int?
+    public let stopReason: String?
+    public init(inputTokens: Int? = nil, outputTokens: Int? = nil, stopReason: String? = nil) {
+        self.inputTokens = inputTokens; self.outputTokens = outputTokens; self.stopReason = stopReason
+    }
+}
+
 /// The assistant's raw reply text, expected to be the contract JSON. Each adapter extracts this
 /// from its own provider envelope; the shared `LLMResponseContract` decoder validates it as untrusted.
 public struct LLMRawResponse: Sendable, Equatable {
     public let jsonText: String
-    public init(jsonText: String) { self.jsonText = jsonText }
+    public let meta: LLMResponseMeta?            // NEW (#3) — additive, defaults nil
+    public init(jsonText: String, meta: LLMResponseMeta? = nil) {
+        self.jsonText = jsonText; self.meta = meta
+    }
 }
 
 public enum LLMError: Error, Equatable {
