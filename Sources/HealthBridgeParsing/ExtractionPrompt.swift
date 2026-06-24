@@ -3,9 +3,10 @@ import Foundation
 /// Builds the extraction instruction string embedding the JSON response contract.
 ///
 /// Pure function of `pages` — no I/O, no provider specifics. Both adapters reference this same
-/// canonical contract: OpenAI mirrors it in `response_format.json_schema` (D2); Anthropic relies on
-/// the embedded contract + assistant prefill (T1). The contract keys named here are exactly the ones
-/// `LLMResponseContract` (Task 4) validates.
+/// canonical contract via native structured outputs: OpenAI mirrors it in `response_format.json_schema`
+/// (D2); Anthropic mirrors it in `output_config.format`. (Prefill was the original T1 design but 400s on
+/// the current Anthropic model family — see AnthropicExtractor.) The contract keys named here are
+/// exactly the ones `LLMResponseContract` (Task 4) validates.
 ///
 /// E1 (prompt-injection): the PDF page text is UNTRUSTED data, not instructions. It is wrapped in a
 /// clearly-delimited block and the model is told to extract only and ignore any instructions found
