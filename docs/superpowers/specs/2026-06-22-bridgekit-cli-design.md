@@ -22,7 +22,7 @@ The document-parsing path is sequenced lowest-risk first:
 
 - **M1 (this spec):** FHIR R4 JSON → subject-bound `bridge.json`. Deterministic, no LLM, no PHI leaves the machine, public FHIR test corpus.
 - **M2:** C-CDA (XML) parser as a sibling `DocumentParser` (we have a real Privia `AmbulatorySummary` sample). No schema change.
-- **M3:** PDF + cloud LLM extraction (BYO key) producing the same `Observation` shape with confidence + source locators. The iOS review screen is what makes LLM output safe, so it follows the deterministic path.
+- **M3:** ✅ **Shipped 2026-06-24 (PR #6).** PDF + cloud LLM extraction (BYO key) producing the same `Observation` shape with confidence + source locators. The iOS review screen is what makes LLM output safe, so it follows the deterministic path.
 - **iOS writer:** consumes the Bridge Document, enforces the binding gate, writes HealthKit.
 
 ---
