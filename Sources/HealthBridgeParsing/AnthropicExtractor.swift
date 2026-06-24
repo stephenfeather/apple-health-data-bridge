@@ -136,7 +136,7 @@ public struct AnthropicExtractor: LLMExtractor {
                 }
                 if Self.isRetryable(http.statusCode), attempt < Self.maxRetries {
                     lastError = .http(status: http.statusCode)
-                    try? await Task.sleep(nanoseconds: Self.retryDelayNanos)
+                    try await Task.sleep(nanoseconds: Self.retryDelayNanos)
                     continue
                 }
                 guard (200..<300).contains(http.statusCode) else {
@@ -149,7 +149,7 @@ public struct AnthropicExtractor: LLMExtractor {
                 // Transport/timeout — retry if attempts remain. Message is fixed/key-free by design.
                 lastError = .transport("network request failed")
                 if attempt < Self.maxRetries {
-                    try? await Task.sleep(nanoseconds: Self.retryDelayNanos)
+                    try await Task.sleep(nanoseconds: Self.retryDelayNanos)
                     continue
                 }
                 throw lastError
