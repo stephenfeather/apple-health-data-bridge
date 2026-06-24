@@ -30,6 +30,62 @@ public enum BridgeBuilder {
     public static func sha256Hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 }
 
+// MARK: - PDF/LLM provider routing (M3)
+
+/// The cloud LLM providers. Default is Anthropic (D1); OpenAI via `--provider openai`.
+enum Provider: String, Equatable {
+    case anthropic, openai
+    var envVar: String { self == .anthropic ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY" }
+    /// Current default model id per provider (D6); overridable via `--model`. Confirmed at the live smoke.
+    var defaultModel: String { self == .anthropic ? "claude-opus-4-8" : "gpt-4.1" }
+    var engine: String { self == .anthropic ? "anthropic-llm" : "openai-llm" }
+}
+
+/// Pure: default Anthropic when `--provider` is omitted (D1); unknown value → a clear Fail.
+func resolveProvider(flag: String?) throws -> Provider {
+    guard let flag else { return .anthropic }
+    guard let p = Provider(rawValue: flag.lowercased()) else {
+        throw Fail("unknown provider '\(flag)' — use anthropic or openai")
+    }
+    return p
+}
+
+/// Pure: `--api-key` flag wins, else the provider env var, else nil. Takes an INJECTED env dict so it
+/// is testable without mutating the process environment. NEVER returns/logs the value elsewhere.
+func resolveAPIKey(flag: String?, provider: Provider, env: [String: String]) -> String? {
+    flag ?? env[provider.envVar]
+}
+
+#if canImport(PDFKit) && os(macOS)
+extension BridgeBuilder {
+    /// PDF/LLM build: takes an INJECTED `LLMExtractor` (mock in tests — zero network), stamps
+    /// `source.kind = .pdf` + `Extractor(engine:"<provider>-llm")`, and reuses the SAME
+    /// mapping/dedupe pipeline as the FHIR/C-CDA `build`. Multi-patient refusal happens inside
+    /// `PDFExtractor.extractDocument` (Task 6). The API key is never passed here — it lives only in the
+    /// already-constructed adapter — so it can never reach the document.
+    static func buildPDF(data: Data, fileName: String, subject: SubjectRef,
+                         extractor: any LLMExtractor, engine: String, model: String,
+                         now: Date = Date()) async throws -> BuildResult {
+        let sha = sha256Hex(data)
+        let result = try await PDFExtractor(extractor: extractor, model: model)
+            .extractDocument(data, subjectId: subject.id)
+        let resolved = result.observations.map { o -> BridgeKit.Observation in
+            var o = o
+            o.mapping = MappingTable.resolve(loinc: o.code?.code, value: o.value, unit: o.unit)
+            return o
+        }
+        var seen = Set<String>()
+        let deduped = resolved.filter { seen.insert($0.id).inserted }
+        let doc = BridgeDocument(
+            schemaVersion: BridgeDocument.currentSchemaVersion,
+            source: Source(kind: .pdf, fileName: fileName, sha256: sha, extractedAt: now,
+                           extractor: Extractor(engine: engine, version: "0.1.0")),
+            subject: subject, observations: deduped)
+        return BuildResult(document: doc, skipped: result.skipped)
+    }
+}
+#endif
+
 public enum PatientMatchResult { case match, mismatch, noPatient, incomplete }
 
 public enum PatientMatch {
@@ -94,18 +150,21 @@ public enum PatientMatch {
 }
 
 @main
-struct HealthBridge: ParsableCommand {
+struct HealthBridge: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "healthbridge",
         abstract: "Parse medical-record documents into subject-bound Bridge Documents.",
         subcommands: [Parse.self, Subject.self])
 }
 
-struct Parse: ParsableCommand {
-    @Argument(help: "Input FHIR JSON file.") var input: String
+struct Parse: AsyncParsableCommand {
+    @Argument(help: "Input document (FHIR JSON, C-CDA XML, or PDF).") var input: String
     @Option(name: .long) var config: String = ConfigLoader.defaultPath
     @Option(name: .long) var subject: String?
     @Option(name: .long) var dataRoot: String?
+    @Option(name: .long, help: "PDF only: LLM provider (anthropic|openai). Default anthropic.") var provider: String?
+    @Option(name: .long, help: "PDF only: API key (else the provider env var). Never persisted/logged.") var apiKey: String?
+    @Option(name: .long, help: "PDF only: override the provider's default model id.") var model: String?
     // ModelsR4 also exports a `Flag` (FHIR resource), so qualify the ArgumentParser property wrapper.
     @ArgumentParser.Flag(name: .long) var verbose = false
     @ArgumentParser.Flag(name: .long) var quiet = false
@@ -116,7 +175,7 @@ struct Parse: ParsableCommand {
         if verbose && quiet { throw ValidationError("--verbose and --quiet are mutually exclusive") }
     }
 
-    func run() throws {
+    func run() async throws {
         let cfg = try ConfigLoader.load(path: config)
         let overrides = Overrides(dataRoot: dataRoot, subject: subject,
                                   logLevel: verbose ? .verbose : (quiet ? .quiet : nil))
@@ -126,6 +185,17 @@ struct Parse: ParsableCommand {
         let inputURL = URL(fileURLWithPath: input)
         let data = try Data(contentsOf: inputURL)
 
+        // T2 hard special-case: PDF routes to the async LLM path BEFORE registry dispatch (PDFExtractor
+        // is async/non-conforming to the sync DocumentParser). A key is required ONLY on this branch.
+        #if canImport(PDFKit) && os(macOS)
+        if PDFExtractor.canParse(data) {
+            let result = try await buildFromPDF(data: data, fileName: inputURL.lastPathComponent, entry: entry)
+            try finalize(result, entry: entry, settings: settings)
+            return
+        }
+        #endif
+
+        // FHIR/C-CDA path (synchronous; no key required).
         // Subject binding only verifies the first Patient; refuse mixed-patient bundles to avoid
         // importing another person's observations under the selected subject.
         if PatientMatch.patientCount(data: data) > 1 {
@@ -144,8 +214,33 @@ struct Parse: ParsableCommand {
                                     hash: SubjectHash.make(name: entry.name, dob: entry.dob),
                                     name: entry.name, dob: entry.dob)
         let result = try BridgeBuilder.build(data: data, fileName: inputURL.lastPathComponent, subject: subjectRef)
-        let doc = result.document
+        try finalize(result, entry: entry, settings: settings)
+    }
 
+    #if canImport(PDFKit) && os(macOS)
+    /// Resolve provider (default Anthropic — D1) + key (flag/env; required here only) + model, build the
+    /// chosen adapter, and run the async PDF extraction. The key lives in memory only.
+    private func buildFromPDF(data: Data, fileName: String, entry: SubjectEntry) async throws -> BuildResult {
+        let resolvedProvider = try resolveProvider(flag: provider)
+        guard let key = resolveAPIKey(flag: apiKey, provider: resolvedProvider,
+                                      env: ProcessInfo.processInfo.environment) else {
+            throw Fail("no API key: set \(resolvedProvider.envVar) or pass --api-key")
+        }
+        let modelId = model ?? resolvedProvider.defaultModel
+        let extractor: any LLMExtractor = resolvedProvider == .anthropic
+            ? AnthropicExtractor(apiKey: key)
+            : OpenAIExtractor(apiKey: key)
+        let subjectRef = SubjectRef(id: entry.subjectId, label: entry.label,
+                                    hash: SubjectHash.make(name: entry.name, dob: entry.dob),
+                                    name: entry.name, dob: entry.dob)
+        return try await BridgeBuilder.buildPDF(data: data, fileName: fileName, subject: subjectRef,
+                                                extractor: extractor, engine: resolvedProvider.engine, model: modelId)
+    }
+    #endif
+
+    /// Shared validate → write → log → ExitCode(2) tail, identical for every parser path.
+    private func finalize(_ result: BuildResult, entry: SubjectEntry, settings: Settings) throws {
+        let doc = result.document
         let issues = BridgeKit.validate(doc)   // disambiguate from Parse.validate() (ParsableCommand)
         for i in issues { try? FileHandle.standardError.write(contentsOf: Data("[\(i.severity)] \(i.message)\n".utf8)) }
         if issues.contains(where: { $0.severity == .error }) { throw Fail("validation failed") }
