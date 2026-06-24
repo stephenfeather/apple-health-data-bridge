@@ -37,16 +37,7 @@ public enum LLMResponseContract {
     /// Decode + validate the contract JSON into `[Observation]` + `[Skip]`.
     /// Throws `ParseError.malformed` on non-JSON / wrong top-level shape.
     public static func decode(_ jsonText: String, subjectId: String) throws -> ParseResult {
-        guard let data = jsonText.data(using: .utf8) else {
-            throw ParseError.malformed("LLM response is not UTF-8 text")
-        }
-        let env: Envelope
-        do {
-            env = try JSONDecoder().decode(Envelope.self, from: data)
-        } catch {
-            throw ParseError.malformed("LLM response is not valid contract JSON")
-        }
-
+        let env = try decodeEnvelope(jsonText)
         var observations: [Observation] = []
         var skipped: [Skip] = []
         for dto in env.observations ?? [] {
@@ -56,6 +47,38 @@ public enum LLMResponseContract {
             }
         }
         return ParseResult(observations: observations, skipped: skipped)
+    }
+
+    /// Number of DISTINCT patients reported in the response's top-level `patients[]` (D4).
+    /// The PDF path's only multi-patient signal — `PDFExtractor` refuses when this exceeds 1
+    /// (single-subject binding parity with the FHIR/C-CDA paths). Identical or absent patient info
+    /// collapses to ≤1; two distinct (name-token + dob) identities count as 2. Throws
+    /// `ParseError.malformed` on non-JSON (same as `decode`).
+    public static func distinctPatientCount(_ jsonText: String) throws -> Int {
+        let env = try decodeEnvelope(jsonText)
+        return Set((env.patients ?? []).compactMap(patientKey)).count
+    }
+
+    private static func decodeEnvelope(_ jsonText: String) throws -> Envelope {
+        guard let data = jsonText.data(using: .utf8) else {
+            throw ParseError.malformed("LLM response is not UTF-8 text")
+        }
+        do {
+            return try JSONDecoder().decode(Envelope.self, from: data)
+        } catch {
+            throw ParseError.malformed("LLM response is not valid contract JSON")
+        }
+    }
+
+    /// Normalized identity key: first+last name token (lowercased) + dob, mirroring M2's match
+    /// discipline. Patients with neither a name nor a dob are ignored (absent info proceeds).
+    private static func patientKey(_ p: PatientDTO) -> String? {
+        let tokens = (p.name ?? "").lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let dob = (p.dob ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        guard let first = tokens.first, let last = tokens.last else {
+            return dob.isEmpty ? nil : "|\(dob)"
+        }
+        return "\(first) \(last)|\(dob)"
     }
 
     // MARK: - Per-entry validation (validate, don't trust)

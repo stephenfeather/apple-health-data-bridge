@@ -49,6 +49,24 @@ final class PDFExtractorTests: XCTestCase {
         }
     }
 
+    /// D4 — single-subject binding parity: a PDF whose LLM response reports >1 distinct patient is
+    /// refused (double-protection, mirroring M1 FHIR bundle / M2 C-CDA recordTarget refusal).
+    func testRefusesMultiPatientResponse() async throws {
+        let ex = PDFExtractor(extractor: MockLLMExtractor(reply: try fixtureText("llm-response-multi-patient")), model: "m")
+        do {
+            _ = try await ex.extractDocument(try fixture("pdf-minimal", "pdf"), subjectId: "s")
+            XCTFail("expected multi-patient refusal")
+        } catch let e as ParseError {
+            guard case .malformed(let m) = e else { return XCTFail("expected .malformed") }
+            XCTAssertTrue(m.lowercased().contains("patient"), m)
+        }
+    }
+
+    func testSinglePatientResponseAccepted() async throws {
+        let ex = PDFExtractor(extractor: MockLLMExtractor(reply: try fixtureText("llm-response-valid")), model: "m")
+        _ = try await ex.extractDocument(try fixture("pdf-minimal", "pdf"), subjectId: "s")   // no throw
+    }
+
     // MARK: - Happy path
 
     func testHappyPathProducesObservations() async throws {

@@ -35,6 +35,11 @@ public struct PDFExtractor {
         let prompt = ExtractionPrompt.make(pages: pages)
         let request = LLMRequest(pages: pages, instructions: prompt, model: model)
         let raw = try await extractor.extract(request)           // LLMError on transport/auth
+        // D4 single-subject binding parity: refuse a PDF whose response reports >1 distinct patient,
+        // before mapping any observations into the selected subject (double-protection vs M1/M2).
+        guard try LLMResponseContract.distinctPatientCount(raw.jsonText) <= 1 else {
+            throw ParseError.malformed("multiple patients in PDF — refusing")
+        }
         return try LLMResponseContract.decode(raw.jsonText, subjectId: subjectId)   // ParseError on malformed
     }
     #endif
