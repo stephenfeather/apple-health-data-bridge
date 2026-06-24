@@ -1,0 +1,15 @@
+{
+  "id": "msg_synthetic_0001",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-synthetic-test",
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"patients\":[{\"name\":\"Jane Public\",\"dob\":\"2000-01-01\"}],\"observations\":[{\"loinc\":\"29463-7\",\"display\":\"Body weight\",\"value\":72.5,\"unit\":\"kg\",\"effectiveDate\":\"2024-01-15\",\"category\":\"vital\",\"confidence\":0.9,\"page\":1,\"snippet\":\"Body weight 72.5 kg\"}]}"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": { "input_tokens": 12, "output_tokens": 48 }
+}
