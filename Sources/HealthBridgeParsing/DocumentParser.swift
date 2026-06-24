@@ -5,9 +5,25 @@ public enum ParseError: Error, Equatable { case unrecognizedFormat; case malform
 
 public struct Skip: Equatable, Sendable {
     public enum Reason: Equatable, Sendable { case noCode, noDate, unrepresentableValue, negated, implausibleDate }
+    /// Structured, machine-readable refinement of why an entry was skipped (issue #5). Additive
+    /// observability layered over `Reason` — populated by the LLM contract decoder at each rejection
+    /// site; `nil` everywhere it is not explicitly set (FHIR/C-CDA paths).
+    public enum Detail: Equatable, Sendable {
+        case bothValueAndText
+        case noUsableValue
+        case nonFiniteValue
+        case confidenceOutOfRange(got: String)   // e.g. "1.5" / "missing"
+        case dateMalformed
+        case dateBeforeDOB
+        case dateAfterNow
+        case missingCode
+    }
     public let reason: Reason
     public let label: String
-    public init(reason: Reason, label: String) { self.reason = reason; self.label = label }
+    public let detail: Detail?            // additive, defaults nil
+    public init(reason: Reason, label: String, detail: Detail? = nil) {
+        self.reason = reason; self.label = label; self.detail = detail
+    }
 }
 
 public struct ParseResult: Sendable {
