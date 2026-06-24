@@ -171,6 +171,38 @@ final class LLMResponseContractTests: XCTestCase {
         XCTAssertEqual(r.observations.first?.category, .vital)
     }
 
+    func testFutureSameUTCDayKept() throws {   // P2: day-granularity, not raw instants
+        let now = LLMResponseContract.parseDate("2026-06-24T09:00:00Z")!
+        let r = try LLMResponseContract.decode(obsJSON("2026-06-24T15:00:00Z"), subjectId: "s",
+                                               subjectDOB: Self.dobJane, now: now)
+        XCTAssertEqual(r.observations.count, 1, "same UTC day, later time = today, must be kept")
+    }
+
+    func testNextUTCDayRejected() throws {
+        let now = LLMResponseContract.parseDate("2026-06-24T09:00:00Z")!
+        let r = try LLMResponseContract.decode(obsJSON("2026-06-25T00:00:00Z"), subjectId: "s",
+                                               subjectDOB: Self.dobJane, now: now)
+        XCTAssertEqual(r.observations.count, 0)
+        XCTAssertTrue(r.skipped.contains { $0.reason == .implausibleDate })
+    }
+
+    func testBothValueAndValueTextRejected() throws {   // P2: contract is "exactly one"
+        let json = #"{"observations":[{"loinc":"29463-7","display":"W","value":72.5,"valueText":"positive","unit":"kg","effectiveDate":"2024-03-15","category":"vital","confidence":0.9}]}"#
+        let r = try LLMResponseContract.decode(json, subjectId: "s", subjectDOB: Self.dobJane, now: Self.fixedNow)
+        XCTAssertEqual(r.observations.count, 0)
+        XCTAssertTrue(r.skipped.contains { $0.reason == .unrepresentableValue })
+    }
+
+    func testExtractedPatientReturnsSingle() throws {
+        let p = try LLMResponseContract.extractedPatient(try fixtureText("llm-response-valid"))
+        XCTAssertEqual(p?.name, "Jane Public")
+        XCTAssertEqual(p?.dob, "2000-01-01")
+    }
+
+    func testExtractedPatientNilWhenAbsent() throws {
+        XCTAssertNil(try LLMResponseContract.extractedPatient(#"{"observations":[]}"#))
+    }
+
     func testIsPlausibleObservationDateHelper() {
         let dob = Self.dobJane, now = Self.fixedNow
         XCTAssertFalse(LLMResponseContract.isPlausibleObservationDate(LLMResponseContract.parseDate("1995-06-01")!, dob: dob, now: now))

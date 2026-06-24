@@ -26,12 +26,13 @@ public struct PDFExtractor {
 
     #if canImport(PDFKit) && os(macOS)
     /// PDF bytes → page text (incl. the D3 page-cap) → extraction prompt → injected extractor →
-    /// validated contract decode → `ParseResult`.
+    /// validated contract decode → `PDFExtraction` (the `ParseResult` PLUS the model-extracted patient
+    /// identity, surfaced so the CLI can verify it against the bound subject — wrong-file protection).
     ///
     /// PDF/text failures throw `ParseError` (bad/over-limit/no-text PDF, malformed contract JSON);
     /// transport/auth failures from the extractor propagate as `LLMError`.
     public func extractDocument(_ data: Data, subjectId: String,
-                                subjectDOB: Date? = nil, now: Date = Date()) async throws -> ParseResult {
+                                subjectDOB: Date? = nil, now: Date = Date()) async throws -> PDFExtraction {
         let pages = try PDFText.pages(data)                       // ParseError on bad/over-limit/no-text
         let prompt = ExtractionPrompt.make(pages: pages)
         let request = LLMRequest(pages: pages, instructions: prompt, model: model)
@@ -41,9 +42,22 @@ public struct PDFExtractor {
         guard try LLMResponseContract.distinctPatientCount(raw.jsonText) <= 1 else {
             throw ParseError.malformed("multiple patients in PDF — refusing")
         }
+        let patient = try LLMResponseContract.extractedPatient(raw.jsonText)
         // subjectDOB (verified roster DOB) + now drive the plausible-date guard inside decode.
-        return try LLMResponseContract.decode(raw.jsonText, subjectId: subjectId,
-                                              subjectDOB: subjectDOB, now: now)   // ParseError on malformed
+        let result = try LLMResponseContract.decode(raw.jsonText, subjectId: subjectId,
+                                                    subjectDOB: subjectDOB, now: now)   // ParseError on malformed
+        return PDFExtraction(result: result, extractedPatient: patient)
     }
     #endif
+}
+
+/// The PDF extraction outcome: the parsed observations/skips PLUS the model-extracted patient identity
+/// (UNTRUSTED — the CLI compares it to the bound subject to catch a wrong-file import).
+public struct PDFExtraction {
+    public let result: ParseResult
+    public let extractedPatient: (name: String, dob: String)?
+    public init(result: ParseResult, extractedPatient: (name: String, dob: String)?) {
+        self.result = result
+        self.extractedPatient = extractedPatient
+    }
 }

@@ -56,6 +56,23 @@ func resolveAPIKey(flag: String?, provider: Provider, env: [String: String]) -> 
     flag ?? env[provider.envVar]
 }
 
+/// The subject-binding policy decision, factored out pure so it is unit-testable and applied
+/// IDENTICALLY on every parser path (FHIR/C-CDA inline; PDF via this function).
+enum SubjectGateDecision: Equatable { case proceed; case refuse(String) }
+
+/// `match`/`noPatient` → proceed; `mismatch` → refuse unless `--force`; `incomplete` (patient present
+/// but missing name/dob) → refuse unless `--allow-unverified-subject`.
+func subjectGate(_ result: PatientMatchResult, force: Bool, allowUnverified: Bool,
+                 detail: String = "") -> SubjectGateDecision {
+    switch result {
+    case .match, .noPatient: return .proceed
+    case .mismatch:
+        return force ? .proceed : .refuse("Patient mismatch — refusing.\(detail.isEmpty ? "" : "\n\(detail)")\nUse --force to override.")
+    case .incomplete:
+        return allowUnverified ? .proceed : .refuse("Patient present but unverifiable — refusing. Use --allow-unverified-subject to override.")
+    }
+}
+
 #if canImport(PDFKit) && os(macOS)
 extension BridgeBuilder {
     /// PDF/LLM build: takes an INJECTED `LLMExtractor` (mock in tests — zero network), stamps
@@ -65,11 +82,12 @@ extension BridgeBuilder {
     /// already-constructed adapter — so it can never reach the document.
     static func buildPDF(data: Data, fileName: String, subject: SubjectRef,
                          extractor: any LLMExtractor, engine: String, model: String,
-                         subjectDOB: Date? = nil, now: Date = Date()) async throws -> BuildResult {
+                         subjectDOB: Date? = nil, now: Date = Date())
+        async throws -> (result: BuildResult, extractedPatient: (name: String, dob: String)?) {
         let sha = sha256Hex(data)
-        let result = try await PDFExtractor(extractor: extractor, model: model)
+        let extraction = try await PDFExtractor(extractor: extractor, model: model)
             .extractDocument(data, subjectId: subject.id, subjectDOB: subjectDOB, now: now)
-        let resolved = result.observations.map { o -> BridgeKit.Observation in
+        let resolved = extraction.result.observations.map { o -> BridgeKit.Observation in
             var o = o
             o.mapping = MappingTable.resolve(loinc: o.code?.code, value: o.value, unit: o.unit)
             return o
@@ -81,7 +99,7 @@ extension BridgeBuilder {
             source: Source(kind: .pdf, fileName: fileName, sha256: sha, extractedAt: now,
                            extractor: Extractor(engine: engine, version: "0.1.0")),
             subject: subject, observations: deduped)
-        return BuildResult(document: doc, skipped: result.skipped)
+        return (BuildResult(document: doc, skipped: extraction.result.skipped), extraction.extractedPatient)
     }
 }
 #endif
@@ -102,8 +120,9 @@ public enum PatientMatch {
         guard let (name, dob) = nameAndDOB(patient) else { return .incomplete }
         return compare(name: name, dob: dob, subject: subject)
     }
-    /// Shared first+last-token name match plus exact dob — identical for FHIR and C-CDA.
-    private static func compare(name: String, dob: String, subject: SubjectEntry) -> PatientMatchResult {
+    /// Shared first+last-token name match plus exact dob — identical for FHIR, C-CDA, and the PDF path
+    /// (which compares the model-extracted identity). Internal so the CLI can reuse it.
+    static func compare(name: String, dob: String, subject: SubjectEntry) -> PatientMatchResult {
         guard !name.isEmpty, !dob.isEmpty else { return .incomplete }
         let docTokens = name.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let subjTokens = subject.name.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
@@ -189,7 +208,15 @@ struct Parse: AsyncParsableCommand {
         // is async/non-conforming to the sync DocumentParser). A key is required ONLY on this branch.
         #if canImport(PDFKit) && os(macOS)
         if PDFExtractor.canParse(data) {
-            let result = try await buildFromPDF(data: data, fileName: inputURL.lastPathComponent, entry: entry)
+            let (result, extractedPatient) = try await buildFromPDF(
+                data: data, fileName: inputURL.lastPathComponent, entry: entry)
+            // Single-subject binding parity (HIGH): verify the model-extracted patient against the bound
+            // subject with the SAME comparator + gating as FHIR/C-CDA. No document is written on refusal.
+            let match = extractedPatient.map { PatientMatch.compare(name: $0.name, dob: $0.dob, subject: entry) } ?? .noPatient
+            let detail = "  document: \(extractedPatient?.name ?? "?") / \(extractedPatient?.dob ?? "?")\n  roster:   \(entry.name) / \(entry.dob)"
+            if case .refuse(let message) = subjectGate(match, force: force, allowUnverified: allowUnverifiedSubject, detail: detail) {
+                throw Fail(message)
+            }
             try finalize(result, entry: entry, settings: settings)
             return
         }
@@ -220,7 +247,8 @@ struct Parse: AsyncParsableCommand {
     #if canImport(PDFKit) && os(macOS)
     /// Resolve provider (default Anthropic — D1) + key (flag/env; required here only) + model, build the
     /// chosen adapter, and run the async PDF extraction. The key lives in memory only.
-    private func buildFromPDF(data: Data, fileName: String, entry: SubjectEntry) async throws -> BuildResult {
+    private func buildFromPDF(data: Data, fileName: String, entry: SubjectEntry)
+        async throws -> (result: BuildResult, extractedPatient: (name: String, dob: String)?) {
         let resolvedProvider = try resolveProvider(flag: provider)
         guard let key = resolveAPIKey(flag: apiKey, provider: resolvedProvider,
                                       env: ProcessInfo.processInfo.environment) else {

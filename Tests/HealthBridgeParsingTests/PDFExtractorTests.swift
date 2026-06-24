@@ -71,10 +71,11 @@ final class PDFExtractorTests: XCTestCase {
 
     func testHappyPathProducesObservations() async throws {
         let ex = PDFExtractor(extractor: MockLLMExtractor(reply: try fixtureText("llm-response-valid")), model: "m")
-        let r = try await ex.extractDocument(try fixture("pdf-minimal", "pdf"), subjectId: "s")
-        XCTAssertFalse(r.observations.isEmpty)
-        let vital = try XCTUnwrap(r.observations.first { $0.category == .vital })
+        let extraction = try await ex.extractDocument(try fixture("pdf-minimal", "pdf"), subjectId: "s")
+        XCTAssertFalse(extraction.result.observations.isEmpty)
+        let vital = try XCTUnwrap(extraction.result.observations.first { $0.category == .vital })
         XCTAssertEqual(vital.confidence, 0.9, accuracy: 1e-9)   // model confidence flows through
+        XCTAssertEqual(extraction.extractedPatient?.name, "Jane Public")   // surfaced for CLI gating
     }
 }
 #endif

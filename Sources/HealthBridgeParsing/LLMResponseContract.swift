@@ -64,6 +64,16 @@ public enum LLMResponseContract {
         return Set((env.patients ?? []).compactMap(patientKey)).count
     }
 
+    /// The single patient reported in the response (when distinct-count ≤ 1, enforced by the caller's
+    /// multi-patient refusal). The CLI compares this — UNTRUSTED, model-extracted — identity against
+    /// the bound subject (the best available document-identity signal for an opaque PDF). `nil` when the
+    /// response reports no patient. Empty name/dob propagate (→ the comparator's `.incomplete`).
+    public static func extractedPatient(_ jsonText: String) throws -> (name: String, dob: String)? {
+        let env = try decodeEnvelope(jsonText)
+        guard let first = (env.patients ?? []).first else { return nil }
+        return (first.name ?? "", first.dob ?? "")
+    }
+
     private static func decodeEnvelope(_ jsonText: String) throws -> Envelope {
         guard let data = jsonText.data(using: .utf8) else {
             throw ParseError.malformed("LLM response is not UTF-8 text")
@@ -103,7 +113,12 @@ public enum LLMResponseContract {
         if let reason = implausibilityReason(date, dob: subjectDOB, now: now) {
             return .failure(Skip(reason: .implausibleDate, label: "\(label) [\(reason)]"))
         }
-        // 3. Value: exactly one of numeric `value` / `valueText`, finite.
+        // 3. Value: EXACTLY one of numeric `value` / `valueText`. The schema forces both fields present
+        // (nullable), so a confused model can emit BOTH non-null — reject the ambiguity, don't guess.
+        if dto.value != nil, let t = dto.valueText, !t.trimmingCharacters(in: .whitespaces).isEmpty {
+            return .failure(Skip(reason: .unrepresentableValue,
+                                 label: "\(label) [rejected: both value and valueText present]"))
+        }
         guard let (value, unit, raw) = resolveValue(dto) else {
             return .failure(Skip(reason: .unrepresentableValue, label: label))
         }
@@ -157,15 +172,25 @@ public enum LLMResponseContract {
     }
 
     /// nil when plausible; otherwise a human-readable reason for the Skip label.
+    /// Compares at UTC CALENDAR-DAY granularity (not raw instants) so a same-UTC-day observation with a
+    /// later wall-clock time than `now` is "today" (kept), not "future"; `== day` is allowed for both
+    /// the birth-day and today boundaries.
     static func implausibilityReason(_ d: Date, dob: Date?, now: Date) -> String? {
-        if let dob, d < dob {
+        let dDay = utcCalendar.startOfDay(for: d)
+        if let dob, dDay < utcCalendar.startOfDay(for: dob) {
             return "implausible date: \(utcDateOnly.string(from: d)) before DOB \(utcDateOnly.string(from: dob))"
         }
-        if d > now {
+        if dDay > utcCalendar.startOfDay(for: now) {
             return "implausible date: \(utcDateOnly.string(from: d)) after \(utcDateOnly.string(from: now))"
         }
         return nil
     }
+
+    private static let utcCalendar: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }()
 
     // MARK: - Date parsing (UTC; date-only -> UTC midnight)
 

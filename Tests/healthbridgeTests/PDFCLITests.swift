@@ -44,24 +44,66 @@ final class PDFBuildCLITests: XCTestCase {
 
     func testPDFBuildStampsPDFKindAndModelConfidence() async throws {
         let mock = MockLLMExtractor(reply: try fixtureText("llm-response-valid"))
-        let result = try await BridgeBuilder.buildPDF(
+        let out = try await BridgeBuilder.buildPDF(
             data: try fixture("pdf-patient", "pdf"), fileName: "p.pdf", subject: subject,
             extractor: mock, engine: "anthropic-llm", model: "m", now: fixedNow)
-        XCTAssertEqual(result.document.source.kind, .pdf)
-        XCTAssertEqual(result.document.source.extractor.engine, "anthropic-llm")
-        XCTAssertTrue(result.document.observations.contains { $0.confidence < 1.0 })   // model confidence, not 1.0
+        XCTAssertEqual(out.result.document.source.kind, .pdf)
+        XCTAssertEqual(out.result.document.source.extractor.engine, "anthropic-llm")
+        XCTAssertTrue(out.result.document.observations.contains { $0.confidence < 1.0 })   // model confidence, not 1.0
     }
 
     func testKeyNeverWrittenToDocument() async throws {
         let mock = MockLLMExtractor(reply: try fixtureText("llm-response-valid"))
-        let result = try await BridgeBuilder.buildPDF(
+        let out = try await BridgeBuilder.buildPDF(
             data: try fixture("pdf-patient", "pdf"), fileName: "p.pdf", subject: subject,
             extractor: mock, engine: "anthropic-llm", model: "m", now: fixedNow)
-        let json = String(decoding: try BridgeJSON.encoder.encode(result.document), as: UTF8.self)
+        let json = String(decoding: try BridgeJSON.encoder.encode(out.result.document), as: UTF8.self)
         XCTAssertFalse(json.contains("ANTHROPIC_API_KEY"))
         XCTAssertFalse(json.contains("OPENAI_API_KEY"))
         XCTAssertFalse(json.lowercased().contains("api-key"))
         XCTAssertFalse(json.lowercased().contains("authorization"))
     }
+
+    func testBuildPDFSurfacesExtractedPatient() async throws {
+        let mock = MockLLMExtractor(reply: try fixtureText("llm-response-valid"))
+        let out = try await BridgeBuilder.buildPDF(
+            data: try fixture("pdf-patient", "pdf"), fileName: "p.pdf", subject: subject,
+            extractor: mock, engine: "anthropic-llm", model: "m", now: fixedNow)
+        XCTAssertEqual(out.extractedPatient?.name, "Jane Public")
+        XCTAssertEqual(out.extractedPatient?.dob, "2000-01-01")
+    }
 }
 #endif
+
+/// Subject-binding gate + comparator parity for the PDF path (pure; no PDF/network).
+final class SubjectGateTests: XCTestCase {
+    private func entry(_ name: String, _ dob: String) -> SubjectEntry {
+        SubjectEntry(key: "jane", subjectId: "u", label: "L", name: name, dob: dob)
+    }
+
+    func testGateProceedsOnMatchAndNoPatient() {
+        XCTAssertEqual(subjectGate(.match, force: false, allowUnverified: false), .proceed)
+        XCTAssertEqual(subjectGate(.noPatient, force: false, allowUnverified: false), .proceed)
+    }
+
+    func testGateRefusesMismatchUnlessForce() {
+        guard case .refuse = subjectGate(.mismatch, force: false, allowUnverified: false) else {
+            return XCTFail("mismatch must refuse without --force")
+        }
+        XCTAssertEqual(subjectGate(.mismatch, force: true, allowUnverified: false), .proceed)
+    }
+
+    func testGateRefusesIncompleteUnlessAllowUnverified() {
+        guard case .refuse = subjectGate(.incomplete, force: false, allowUnverified: false) else {
+            return XCTFail("incomplete must refuse without --allow-unverified-subject")
+        }
+        XCTAssertEqual(subjectGate(.incomplete, force: false, allowUnverified: true), .proceed)
+    }
+
+    func testPatientCompareParity() {
+        let jane = entry("Jane Public", "2000-01-01")
+        XCTAssertEqual(PatientMatch.compare(name: "John Sample", dob: "1980-06-15", subject: jane), .mismatch)
+        XCTAssertEqual(PatientMatch.compare(name: "Jane Public", dob: "2000-01-01", subject: jane), .match)
+        XCTAssertEqual(PatientMatch.compare(name: "", dob: "", subject: jane), .incomplete)   // extracted patient missing fields
+    }
+}
