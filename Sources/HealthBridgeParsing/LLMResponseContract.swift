@@ -191,10 +191,10 @@ public enum LLMResponseContract {
     static func implausibilityReason(_ d: Date, dob: Date?, now: Date) -> String? {
         let dDay = utcCalendar.startOfDay(for: d)
         if let dob, dDay < utcCalendar.startOfDay(for: dob) {
-            return "implausible date: \(utcDateOnly.string(from: d)) before DOB \(utcDateOnly.string(from: dob))"
+            return "implausible date: \(utcDateString(d)) before DOB \(utcDateString(dob))"
         }
         if dDay > utcCalendar.startOfDay(for: now) {
-            return "implausible date: \(utcDateOnly.string(from: d)) after \(utcDateOnly.string(from: now))"
+            return "implausible date: \(utcDateString(d)) after \(utcDateString(now))"
         }
         return nil
     }
@@ -205,17 +205,15 @@ public enum LLMResponseContract {
         return c
     }()
 
-    // MARK: - Date parsing (UTC; date-only -> UTC midnight)
+    /// Format a `Date` as zero-padded UTC `yyyy-MM-dd` for Skip LABELS. Uses the thread-safe `utcCalendar`
+    /// value type (Foundation `DateFormatter` is NOT thread-safe for concurrent `string(from:)`, and this
+    /// is a public, concurrently-callable library API).
+    private static func utcDateString(_ d: Date) -> String {
+        let c = utcCalendar.dateComponents([.year, .month, .day], from: d)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
 
-    /// UTC `yyyy-MM-dd` formatter — for Skip LABELS only (parsing is the manual round-trip below).
-    private static let utcDateOnly: DateFormatter = {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
+    // MARK: - Date parsing (UTC; date-only -> UTC midnight)
 
     /// Parse an ISO-8601 / `yyyy-MM-dd` date from untrusted LLM output. Also used by the CLI to parse
     /// the roster DOB with the IDENTICAL UTC discipline so the plausible-date comparison is exact.

@@ -141,6 +141,22 @@ final class LLMResponseContractTests: XCTestCase {
         XCTAssertTrue(r.skipped.contains { $0.reason == .implausibleDate })
     }
 
+    /// G1/G6 pin: the implausible-date reason string must keep the exact `yyyy-MM-dd` wording after the
+    /// DateFormatter is replaced with thread-safe calendar formatting. Exercises both branches.
+    func testImplausibilityReasonLabelFormat() {
+        let before = LLMResponseContract.parseDate("1995-06-01")!
+        XCTAssertEqual(LLMResponseContract.implausibilityReason(before, dob: Self.dobJane, now: Self.fixedNow),
+                       "implausible date: 1995-06-01 before DOB 2000-01-01")
+        let future = LLMResponseContract.parseDate("2030-01-01")!
+        XCTAssertEqual(LLMResponseContract.implausibilityReason(future, dob: Self.dobJane, now: Self.fixedNow),
+                       "implausible date: 2030-01-01 after 2026-06-24")
+        // single-digit month/day must zero-pad (regression guard for %02d)
+        let early = LLMResponseContract.parseDate("0500-03-07")!
+        XCTAssertEqual(LLMResponseContract.implausibilityReason(early, dob: Self.dobJane, now: Self.fixedNow),
+                       "implausible date: 0500-03-07 before DOB 2000-01-01")
+        XCTAssertNil(LLMResponseContract.implausibilityReason(Self.dobJane, dob: Self.dobJane, now: Self.fixedNow))
+    }
+
     func testNilDOBStillRejectsFutureButAllowsOld() throws {
         // No verified DOB: before-birth check skipped, future check STILL enforced.
         let future = try LLMResponseContract.decode(obsJSON("2030-01-01"), subjectId: "s",
