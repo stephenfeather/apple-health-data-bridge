@@ -36,12 +36,17 @@ public enum LLMResponseContract {
 
     /// Decode + validate the contract JSON into `[Observation]` + `[Skip]`.
     /// Throws `ParseError.malformed` on non-JSON / wrong top-level shape.
-    public static func decode(_ jsonText: String, subjectId: String) throws -> ParseResult {
+    ///
+    /// `subjectDOB` (the bound subject's VERIFIED roster DOB, not the model's untrusted patients[].dob)
+    /// and `now` drive the plausible-date guard: an effectiveDate strictly before DOB or strictly after
+    /// `now` is rejected as `Skip(.implausibleDate)` — catching a model that fabricates/borrows a date.
+    public static func decode(_ jsonText: String, subjectId: String,
+                              subjectDOB: Date? = nil, now: Date = Date()) throws -> ParseResult {
         let env = try decodeEnvelope(jsonText)
         var observations: [Observation] = []
         var skipped: [Skip] = []
         for dto in env.observations ?? [] {
-            switch mapEntry(dto, subjectId: subjectId) {
+            switch mapEntry(dto, subjectId: subjectId, subjectDOB: subjectDOB, now: now) {
             case .success(let o): observations.append(o)
             case .failure(let s): skipped.append(s)
             }
@@ -83,16 +88,20 @@ public enum LLMResponseContract {
 
     // MARK: - Per-entry validation (validate, don't trust)
 
-    private static func mapEntry(_ dto: ObservationDTO, subjectId: String) -> MapResult {
+    private static func mapEntry(_ dto: ObservationDTO, subjectId: String,
+                                 subjectDOB: Date?, now: Date) -> MapResult {
         let label = dto.display ?? dto.loinc ?? "Unknown"
 
         // 1. LOINC code (so the existing MappingTable applies).
         guard let loinc = dto.loinc, !loinc.trimmingCharacters(in: .whitespaces).isEmpty else {
             return .failure(Skip(reason: .noCode, label: label))
         }
-        // 2. Effective date (ISO-8601 / yyyy-mm-dd, UTC discipline).
+        // 2. Effective date (ISO-8601 / yyyy-mm-dd, UTC discipline) — well-formed AND in range.
         guard let dateStr = dto.effectiveDate, let date = parseDate(dateStr) else {
             return .failure(Skip(reason: .noDate, label: label))
+        }
+        if let reason = implausibilityReason(date, dob: subjectDOB, now: now) {
+            return .failure(Skip(reason: .implausibleDate, label: "\(label) [\(reason)]"))
         }
         // 3. Value: exactly one of numeric `value` / `valueText`, finite.
         guard let (value, unit, raw) = resolveValue(dto) else {
@@ -137,9 +146,41 @@ public enum LLMResponseContract {
         }
     }
 
+    // MARK: - Plausible-date guard (before-DOB / future)
+
+    /// Reusable predicate: an observation date is plausible iff it is NOT strictly before the subject's
+    /// DOB (birth-day measurements at == DOB are allowed) and NOT strictly after `now` (== today is
+    /// allowed). A nil DOB skips the before-birth check but the future check still applies. Exposed so
+    /// the FHIR/C-CDA paths can adopt the same guard later (deferred — not retrofitted here).
+    public static func isPlausibleObservationDate(_ d: Date, dob: Date?, now: Date) -> Bool {
+        implausibilityReason(d, dob: dob, now: now) == nil
+    }
+
+    /// nil when plausible; otherwise a human-readable reason for the Skip label.
+    static func implausibilityReason(_ d: Date, dob: Date?, now: Date) -> String? {
+        if let dob, d < dob {
+            return "implausible date: \(utcDateOnly.string(from: d)) before DOB \(utcDateOnly.string(from: dob))"
+        }
+        if d > now {
+            return "implausible date: \(utcDateOnly.string(from: d)) after \(utcDateOnly.string(from: now))"
+        }
+        return nil
+    }
+
     // MARK: - Date parsing (UTC; date-only -> UTC midnight)
 
-    /// Parse an ISO-8601 / `yyyy-MM-dd` date from untrusted LLM output.
+    /// UTC `yyyy-MM-dd` formatter — for Skip LABELS only (parsing is the manual round-trip below).
+    private static let utcDateOnly: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    /// Parse an ISO-8601 / `yyyy-MM-dd` date from untrusted LLM output. Also used by the CLI to parse
+    /// the roster DOB with the IDENTICAL UTC discipline so the plausible-date comparison is exact.
     ///
     /// `Calendar.date(from:)` and the date formatters SILENTLY NORMALIZE out-of-range components
     /// (e.g. `2000-02-30` -> 2000-03-01) instead of failing — the same integrity bug M2 fixed on the
@@ -147,7 +188,7 @@ public enum LLMResponseContract {
     /// components manually and ROUND-TRIP through the same UTC/fixed-offset Gregorian calendar,
     /// rejecting (→ nil → `Skip(.noDate)`) if any component changed. Fixed offsets have no DST, so
     /// there are no false negatives.
-    private static func parseDate(_ s: String) -> Date? {
+    public static func parseDate(_ s: String) -> Date? {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return nil }
 

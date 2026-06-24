@@ -117,6 +117,69 @@ final class LLMResponseContractTests: XCTestCase {
         XCTAssertEqual(r.skipped.count, 0)
     }
 
+    // MARK: - Plausible-date guard (before-DOB / future)
+
+    private static let dobJane = LLMResponseContract.parseDate("2000-01-01")!
+    private static let fixedNow = LLMResponseContract.parseDate("2026-06-24")!
+    private func obsJSON(_ effectiveDate: String) -> String {
+        #"{"observations":[{"loinc":"29463-7","display":"W","value":72.5,"unit":"kg","effectiveDate":""# +
+        effectiveDate +
+        #"","category":"vital","confidence":0.9}]}"#
+    }
+
+    func testBeforeDOBDateRejected() throws {   // error handler
+        let r = try LLMResponseContract.decode(obsJSON("1995-06-01"), subjectId: "s",
+                                               subjectDOB: Self.dobJane, now: Self.fixedNow)
+        XCTAssertEqual(r.observations.count, 0)
+        XCTAssertTrue(r.skipped.contains { $0.reason == .implausibleDate })
+    }
+
+    func testFutureDateRejected() throws {   // error handler
+        let r = try LLMResponseContract.decode(obsJSON("2030-01-01"), subjectId: "s",
+                                               subjectDOB: Self.dobJane, now: Self.fixedNow)
+        XCTAssertEqual(r.observations.count, 0)
+        XCTAssertTrue(r.skipped.contains { $0.reason == .implausibleDate })
+    }
+
+    func testNilDOBStillRejectsFutureButAllowsOld() throws {
+        // No verified DOB: before-birth check skipped, future check STILL enforced.
+        let future = try LLMResponseContract.decode(obsJSON("2030-01-01"), subjectId: "s",
+                                                    subjectDOB: nil, now: Self.fixedNow)
+        XCTAssertEqual(future.observations.count, 0)
+        XCTAssertTrue(future.skipped.contains { $0.reason == .implausibleDate })
+        let old = try LLMResponseContract.decode(obsJSON("1900-01-01"), subjectId: "s",
+                                                 subjectDOB: nil, now: Self.fixedNow)
+        XCTAssertEqual(old.observations.count, 1)   // no DOB to compare against → kept
+    }
+
+    func testDateEqualsDOBKept() throws {   // boundary: birth-day measurement allowed
+        let r = try LLMResponseContract.decode(obsJSON("2000-01-01"), subjectId: "s",
+                                               subjectDOB: Self.dobJane, now: Self.fixedNow)
+        XCTAssertEqual(r.observations.count, 1)
+    }
+
+    func testDateEqualsNowKept() throws {   // boundary: today allowed
+        let r = try LLMResponseContract.decode(obsJSON("2026-06-24"), subjectId: "s",
+                                               subjectDOB: Self.dobJane, now: Self.fixedNow)
+        XCTAssertEqual(r.observations.count, 1)
+    }
+
+    func testInRangeDateKept() throws {   // regression
+        let r = try LLMResponseContract.decode(obsJSON("2024-03-15"), subjectId: "s",
+                                               subjectDOB: Self.dobJane, now: Self.fixedNow)
+        XCTAssertEqual(r.observations.count, 1)
+        XCTAssertEqual(r.observations.first?.category, .vital)
+    }
+
+    func testIsPlausibleObservationDateHelper() {
+        let dob = Self.dobJane, now = Self.fixedNow
+        XCTAssertFalse(LLMResponseContract.isPlausibleObservationDate(LLMResponseContract.parseDate("1995-06-01")!, dob: dob, now: now))
+        XCTAssertFalse(LLMResponseContract.isPlausibleObservationDate(LLMResponseContract.parseDate("2030-01-01")!, dob: dob, now: now))
+        XCTAssertTrue(LLMResponseContract.isPlausibleObservationDate(dob, dob: dob, now: now))   // == DOB
+        XCTAssertTrue(LLMResponseContract.isPlausibleObservationDate(now, dob: dob, now: now))   // == now
+        XCTAssertTrue(LLMResponseContract.isPlausibleObservationDate(LLMResponseContract.parseDate("2024-03-15")!, dob: dob, now: now))
+    }
+
     /// Regression pin: with a nullable effectiveDate, a model that honestly reports a missing date as
     /// `null` (or "") must map to Skip(.noDate) — NOT a fabricated/normalized Observation.
     func testNullOrEmptyEffectiveDateSkipped() throws {

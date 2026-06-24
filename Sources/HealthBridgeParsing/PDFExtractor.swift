@@ -30,7 +30,8 @@ public struct PDFExtractor {
     ///
     /// PDF/text failures throw `ParseError` (bad/over-limit/no-text PDF, malformed contract JSON);
     /// transport/auth failures from the extractor propagate as `LLMError`.
-    public func extractDocument(_ data: Data, subjectId: String) async throws -> ParseResult {
+    public func extractDocument(_ data: Data, subjectId: String,
+                                subjectDOB: Date? = nil, now: Date = Date()) async throws -> ParseResult {
         let pages = try PDFText.pages(data)                       // ParseError on bad/over-limit/no-text
         let prompt = ExtractionPrompt.make(pages: pages)
         let request = LLMRequest(pages: pages, instructions: prompt, model: model)
@@ -40,7 +41,9 @@ public struct PDFExtractor {
         guard try LLMResponseContract.distinctPatientCount(raw.jsonText) <= 1 else {
             throw ParseError.malformed("multiple patients in PDF — refusing")
         }
-        return try LLMResponseContract.decode(raw.jsonText, subjectId: subjectId)   // ParseError on malformed
+        // subjectDOB (verified roster DOB) + now drive the plausible-date guard inside decode.
+        return try LLMResponseContract.decode(raw.jsonText, subjectId: subjectId,
+                                              subjectDOB: subjectDOB, now: now)   // ParseError on malformed
     }
     #endif
 }

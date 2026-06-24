@@ -34,7 +34,8 @@ final class PDFBuildCLITests: XCTestCase {
     }
     private let subject = SubjectRef(id: "11111111-1111-1111-1111-111111111111", label: "Jane",
                                      hash: "h", name: "Jane Public", dob: "2000-01-01")
-    private let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+    // After the fixture's observation dates (2024-03-15) so the plausible-date guard keeps them.
+    private let fixedNow = Date(timeIntervalSince1970: 1_730_000_000)   // 2024-10-27
 
     struct MockLLMExtractor: LLMExtractor {
         let reply: String

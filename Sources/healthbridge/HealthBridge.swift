@@ -65,10 +65,10 @@ extension BridgeBuilder {
     /// already-constructed adapter — so it can never reach the document.
     static func buildPDF(data: Data, fileName: String, subject: SubjectRef,
                          extractor: any LLMExtractor, engine: String, model: String,
-                         now: Date = Date()) async throws -> BuildResult {
+                         subjectDOB: Date? = nil, now: Date = Date()) async throws -> BuildResult {
         let sha = sha256Hex(data)
         let result = try await PDFExtractor(extractor: extractor, model: model)
-            .extractDocument(data, subjectId: subject.id)
+            .extractDocument(data, subjectId: subject.id, subjectDOB: subjectDOB, now: now)
         let resolved = result.observations.map { o -> BridgeKit.Observation in
             var o = o
             o.mapping = MappingTable.resolve(loinc: o.code?.code, value: o.value, unit: o.unit)
@@ -233,8 +233,12 @@ struct Parse: AsyncParsableCommand {
         let subjectRef = SubjectRef(id: entry.subjectId, label: entry.label,
                                     hash: SubjectHash.make(name: entry.name, dob: entry.dob),
                                     name: entry.name, dob: entry.dob)
+        // Verified roster DOB (not the model's untrusted patients[].dob) for the plausible-date guard,
+        // parsed with the decoder's identical UTC discipline.
+        let subjectDOB = LLMResponseContract.parseDate(entry.dob)
         return try await BridgeBuilder.buildPDF(data: data, fileName: fileName, subject: subjectRef,
-                                                extractor: extractor, engine: resolvedProvider.engine, model: modelId)
+                                                extractor: extractor, engine: resolvedProvider.engine,
+                                                model: modelId, subjectDOB: subjectDOB)
     }
     #endif
 
