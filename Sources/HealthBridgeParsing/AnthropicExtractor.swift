@@ -145,6 +145,8 @@ public struct AnthropicExtractor: LLMExtractor {
                 return try Self.parseEnvelope(data)
             } catch let e as LLMError {
                 throw e   // non-retryable HTTP or malformed envelope — surface immediately (key-free)
+            } catch is CancellationError {
+                throw CancellationError()   // cooperative cancellation: never retry, surface as-is
             } catch {
                 // Transport/timeout — retry if attempts remain. Message is fixed/key-free by design.
                 lastError = .transport("network request failed")
