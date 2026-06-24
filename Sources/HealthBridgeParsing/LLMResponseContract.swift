@@ -117,28 +117,34 @@ public enum LLMResponseContract {
 
         // 1. LOINC code (so the existing MappingTable applies).
         guard let loinc = dto.loinc, !loinc.trimmingCharacters(in: .whitespaces).isEmpty else {
-            return .failure(Skip(reason: .noCode, label: label))
+            return .failure(Skip(reason: .noCode, label: label, detail: .missingCode))
         }
         // 2. Effective date (ISO-8601 / yyyy-mm-dd, UTC discipline) — well-formed AND in range.
         guard let dateStr = dto.effectiveDate, let date = parseDate(dateStr) else {
-            return .failure(Skip(reason: .noDate, label: label))
+            return .failure(Skip(reason: .noDate, label: label, detail: .dateMalformed))
         }
-        if let reason = implausibilityReason(date, dob: subjectDOB, now: now) {
-            return .failure(Skip(reason: .implausibleDate, label: "\(label) [\(reason)]"))
+        if let implausibility = implausibility(date, dob: subjectDOB, now: now) {
+            return .failure(Skip(reason: .implausibleDate, label: "\(label) [\(implausibility.reason)]",
+                                 detail: implausibility.detail))
         }
         // 3. Value: EXACTLY one of numeric `value` / `valueText`. The schema forces both fields present
         // (nullable), so a confused model can emit BOTH non-null — reject the ambiguity, don't guess.
         if dto.value != nil, let t = dto.valueText, !t.trimmingCharacters(in: .whitespaces).isEmpty {
             return .failure(Skip(reason: .unrepresentableValue,
-                                 label: "\(label) [rejected: both value and valueText present]"))
+                                 label: "\(label) [rejected: both value and valueText present]",
+                                 detail: .bothValueAndText))
         }
-        guard let (value, unit, raw) = resolveValue(dto) else {
-            return .failure(Skip(reason: .unrepresentableValue, label: label))
+        let resolved = resolveValue(dto)
+        guard case .ok(let value, let unit, let raw) = resolved else {
+            let detail: Skip.Detail = (resolved == .nonFinite) ? .nonFiniteValue : .noUsableValue
+            return .failure(Skip(reason: .unrepresentableValue, label: label, detail: detail))
         }
         // 4. Confidence: validate against 0...1 — REJECT out-of-range/absent, NEVER clamp.
         guard let confidence = dto.confidence, (0.0...1.0).contains(confidence) else {
             let got = dto.confidence.map { String($0) } ?? "missing"
-            return .failure(Skip(reason: .unrepresentableValue, label: "\(label) [rejected: confidence \(got) not in 0...1]"))
+            return .failure(Skip(reason: .unrepresentableValue,
+                                 label: "\(label) [rejected: confidence \(got) not in 0...1]",
+                                 detail: .confidenceOutOfRange(got: got)))
         }
 
         let id = ObservationID.derive(subjectId: subjectId, system: loincSystem, code: loinc,
@@ -153,17 +159,34 @@ public enum LLMResponseContract {
             mapping: nil, confidence: confidence, sourceLocator: locator))
     }
 
+    /// Outcome of resolving an entry's value. Splitting the two failure modes lets the caller record a
+    /// precise `Skip.Detail` (`.nonFiniteValue` vs `.noUsableValue`) without changing the success shape.
+    /// `internal` (not `private`) so tests can pin the defensive non-finite branch, which is unreachable
+    /// through `decode` (JSONDecoder rejects overflowing numbers as malformed before they reach here).
+    enum ResolvedValue: Equatable {
+        case ok(ObservationValue, String?, String)
+        case nonFinite          // numeric `value` present but not finite (e.g. ±inf / NaN)
+        case noUsable           // neither a numeric value nor a non-empty valueText
+    }
+
+    /// Test-only seam over the non-finite branch of `resolveValue` (see `ResolvedValue`).
+    static func resolveValueForTesting(_ v: Double) -> ResolvedValue {
+        resolveValue(ObservationDTO(loinc: nil, display: nil, value: v, valueText: nil, unit: "kg",
+                                    effectiveDate: nil, category: nil, confidence: nil,
+                                    page: nil, snippet: nil))
+    }
+
     /// Quantity → shared overflow-safe `stableNumberString` (id-parity with FHIR/C-CDA);
-    /// qualitative → string with no unit. Neither / non-finite → nil (caller records a Skip).
-    private static func resolveValue(_ dto: ObservationDTO) -> (ObservationValue, String?, String)? {
+    /// qualitative → string with no unit. Non-finite numeric → `.nonFinite`; neither → `.noUsable`.
+    private static func resolveValue(_ dto: ObservationDTO) -> ResolvedValue {
         if let v = dto.value {
-            guard v.isFinite else { return nil }
-            return (.quantity(v), dto.unit, stableNumberString(v))
+            guard v.isFinite else { return .nonFinite }
+            return .ok(.quantity(v), dto.unit, stableNumberString(v))
         }
         if let t = dto.valueText, !t.trimmingCharacters(in: .whitespaces).isEmpty {
-            return (.string(t), nil, t)
+            return .ok(.string(t), nil, t)
         }
-        return nil
+        return .noUsable
     }
 
     private static func mapCategory(_ s: String?) -> ObservationCategory {
@@ -189,12 +212,19 @@ public enum LLMResponseContract {
     /// later wall-clock time than `now` is "today" (kept), not "future"; `== day` is allowed for both
     /// the birth-day and today boundaries.
     static func implausibilityReason(_ d: Date, dob: Date?, now: Date) -> String? {
+        implausibility(d, dob: dob, now: now)?.reason
+    }
+
+    /// Both the label `reason` string AND the structured `Skip.Detail` for an implausible date, so
+    /// `mapEntry` can distinguish before-DOB from after-now (issue #5). Single source of truth for the
+    /// day-granularity comparison; `implausibilityReason` and `isPlausibleObservationDate` delegate here.
+    static func implausibility(_ d: Date, dob: Date?, now: Date) -> (reason: String, detail: Skip.Detail)? {
         let dDay = utcCalendar.startOfDay(for: d)
         if let dob, dDay < utcCalendar.startOfDay(for: dob) {
-            return "implausible date: \(utcDateString(d)) before DOB \(utcDateString(dob))"
+            return ("implausible date: \(utcDateString(d)) before DOB \(utcDateString(dob))", .dateBeforeDOB)
         }
         if dDay > utcCalendar.startOfDay(for: now) {
-            return "implausible date: \(utcDateString(d)) after \(utcDateString(now))"
+            return ("implausible date: \(utcDateString(d)) after \(utcDateString(now))", .dateAfterNow)
         }
         return nil
     }
