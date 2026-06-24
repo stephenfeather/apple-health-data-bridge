@@ -11,16 +11,18 @@ final class AnthropicExtractorTests: XCTestCase {
     // Synthetic, non-real placeholder that deliberately does NOT match the `sk-...` key denylist.
     private static let placeholderKey = "ANTHROPIC-TEST-KEY-PLACEHOLDER"
 
-    func testMakeRequestSetsAuthHeaderAndForcesJSONViaPrefill() throws {
+    func testMakeRequestSetsAuthHeaderAndForcesJSONViaStructuredOutputs() throws {
         let ex = AnthropicExtractor(apiKey: Self.placeholderKey)
         let req = try ex.makeRequest(LLMRequest(pages: ["x"], instructions: "do", model: "claude-x"))
         XCTAssertEqual(req.value(forHTTPHeaderField: "x-api-key"), Self.placeholderKey)
         XCTAssertNotNil(req.value(forHTTPHeaderField: "anthropic-version"))
         XCTAssertEqual(req.httpMethod, "POST")
         let body = String(decoding: req.httpBody ?? Data(), as: UTF8.self)
-        XCTAssertTrue(body.contains("assistant"), "PREFILL assistant turn must be present (D2/T1)")
-        XCTAssertFalse(body.contains("tool_choice"), "must NOT use tool-use (T1)")
-        XCTAssertFalse(body.contains("input_schema"), "must NOT use tool-use (T1)")
+        XCTAssertTrue(body.contains("output_config"), "structured outputs (output_config.format) must be present (D2)")
+        XCTAssertTrue(body.contains("json_schema"))
+        XCTAssertFalse(body.contains("assistant"), "no assistant PREFILL turn (prefill 400s on current models)")
+        XCTAssertFalse(body.contains("tool_choice"), "must NOT use tool-use")
+        XCTAssertFalse(body.contains("input_schema"), "must NOT use tool-use")
         XCTAssertTrue(body.contains("claude-x"), "model id comes from the request")
     }
 
@@ -28,18 +30,9 @@ final class AnthropicExtractorTests: XCTestCase {
         let raw = try AnthropicExtractor.parseEnvelope(try fixtureData("anthropic-envelope"))
         XCTAssertTrue(raw.jsonText.hasPrefix("{"))
         XCTAssertTrue(raw.jsonText.contains("observations") || raw.jsonText.contains("loinc"))
-        // Reconstructed JSON must be decodable by the untrusted-output contract.
+        // The structured-outputs JSON must be decodable by the untrusted-output contract (still validated).
         let result = try LLMResponseContract.decode(raw.jsonText, subjectId: "s")
         XCTAssertFalse(result.observations.isEmpty)
-    }
-
-    /// T1 prefill reconstruction: after a `{` prefill the model returns the continuation WITHOUT the
-    /// leading brace, so parseEnvelope must re-prepend it.
-    func testParseEnvelopeReprependsPrefillBrace() throws {
-        let env = #"{"content":[{"type":"text","text":"\"observations\":[]}"}]}"#
-        let raw = try AnthropicExtractor.parseEnvelope(Data(env.utf8))
-        XCTAssertTrue(raw.jsonText.hasPrefix("{"))
-        XCTAssertTrue(raw.jsonText.contains("observations"))
     }
 
     func testMalformedEnvelopeThrows() throws {

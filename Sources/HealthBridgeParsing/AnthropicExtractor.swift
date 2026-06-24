@@ -5,18 +5,23 @@ import FoundationNetworking
 
 /// Anthropic Messages API adapter — the DEFAULT provider (D1).
 ///
-/// JSON-forcing is **assistant PREFILL** (D2/T1), NOT tool-use: the request seeds the assistant turn
-/// with `{` so the model continues valid JSON, and the reply stays in `content[0].text`. Anthropic's
-/// Messages API has no `response_format` (that is OpenAI-only). If tool-use were ever adopted, the
-/// reply would move into a `tool_use` block's `.input` and `parseEnvelope` would need to read THAT,
-/// not `content[0].text`.
+/// JSON-forcing = **structured outputs** (`output_config.format` json_schema). Assistant PREFILL was
+/// the original plan (T1) but it returns HTTP 400 on the current model family (incl. our default
+/// `claude-opus-4-8`) — prefill is removed on 4.6+; the docs direct you to structured outputs. The
+/// reply is a normal text block at `content[0].text` containing complete, schema-valid JSON. (If
+/// structured outputs were ever unavailable, tool-use — reading the `tool_use` block's `.input` — is
+/// the alternative; NOT prefill.)
+///
+/// Structured outputs guarantees response SHAPE, not clinical correctness, so the shared
+/// `LLMResponseContract` decoder STILL validates every reply as untrusted (D2 belt-and-suspenders) —
+/// e.g. confidence-range and date-validity checks live in the decoder, not the schema.
 ///
 /// The two pure halves (`makeRequest`, `parseEnvelope`) are unit-tested directly; only `extract`
 /// touches the network (one `URLSession.data(for:)` call wrapped in a bounded 2× retry — D5),
 /// covered by the Task 9 manual smoke. The API key is held only for the auth header — never logged,
 /// never placed in an error string.
 public struct AnthropicExtractor: LLMExtractor {
-    /// Anthropic Messages API version header. Stable GA value; confirm current at the Task 9 smoke (D6).
+    /// Anthropic Messages API version header. Confirmed current (D6).
     static let anthropicVersion = "2023-06-01"
     static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
     static let maxTokens = 4096
@@ -32,7 +37,52 @@ public struct AnthropicExtractor: LLMExtractor {
         self.apiKey = apiKey
     }
 
-    /// PURE: build the POST request with assistant-PREFILL JSON-forcing (T1). No I/O. No tool-use.
+    /// JSON Schema for the response envelope, within structured-output limits: `additionalProperties:
+    /// false` and every object key in `required` (optional fields are nullable types instead). No
+    /// `minLength`/`maximum`/`minimum`/`multipleOf` (range validation stays in the decoder), no
+    /// recursion. Shape only — the decoder enforces confidence 0...1, date validity, code/value rules.
+    static let contractSchema: [String: Any] = [
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["patients", "observations"],
+        "properties": [
+            "patients": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "dob"],
+                    "properties": [
+                        "name": ["type": "string"],
+                        "dob": ["type": "string"],
+                    ],
+                ],
+            ],
+            "observations": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["loinc", "display", "value", "valueText", "unit",
+                                 "effectiveDate", "category", "confidence", "page", "snippet"],
+                    "properties": [
+                        "loinc": ["type": "string"],
+                        "display": ["type": "string"],
+                        "value": ["type": ["number", "null"]],
+                        "valueText": ["type": ["string", "null"]],
+                        "unit": ["type": ["string", "null"]],
+                        "effectiveDate": ["type": "string"],
+                        "category": ["type": "string"],
+                        "confidence": ["type": "number"],
+                        "page": ["type": ["integer", "null"]],
+                        "snippet": ["type": ["string", "null"]],
+                    ],
+                ],
+            ],
+        ],
+    ]
+
+    /// PURE: build the POST request with structured-outputs JSON-forcing. No I/O. No prefill, no tool-use.
     func makeRequest(_ r: LLMRequest) throws -> URLRequest {
         var req = URLRequest(url: Self.endpoint)
         req.httpMethod = "POST"
@@ -44,16 +94,20 @@ public struct AnthropicExtractor: LLMExtractor {
             "max_tokens": Self.maxTokens,
             "messages": [
                 ["role": "user", "content": r.instructions],
-                ["role": "assistant", "content": "{"],   // PREFILL — seeds JSON; reply continues after '{'
+            ],
+            "output_config": [
+                "format": [
+                    "type": "json_schema",
+                    "schema": Self.contractSchema,
+                ],
             ],
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         return req
     }
 
-    /// PURE: extract the assistant text from `content[0].text` and reconstruct the full JSON.
-    /// Because the assistant turn was prefilled with `{`, the returned text continues AFTER it, so the
-    /// seed is re-prepended unless the model already echoed it.
+    /// PURE: extract the complete, schema-valid JSON from `content[0].text` (no reconstruction needed
+    /// with structured outputs). Throws `LLMError.malformedResponse` on an unexpected envelope shape.
     static func parseEnvelope(_ data: Data) throws -> LLMRawResponse {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let content = obj["content"] as? [[String: Any]],
@@ -61,9 +115,7 @@ public struct AnthropicExtractor: LLMExtractor {
               let text = first["text"] as? String else {
             throw LLMError.malformedResponse("unexpected Anthropic envelope shape")
         }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let json = trimmed.hasPrefix("{") ? trimmed : "{" + trimmed
-        return LLMRawResponse(jsonText: json)
+        return LLMRawResponse(jsonText: text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     public func extract(_ request: LLMRequest) async throws -> LLMRawResponse {
