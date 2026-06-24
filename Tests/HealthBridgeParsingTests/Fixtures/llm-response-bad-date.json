@@ -1,0 +1,23 @@
+{
+  "patients": [ { "name": "Jane Public", "dob": "2000-01-01" } ],
+  "observations": [
+    {
+      "loinc": "29463-7",
+      "display": "Date-only invalid day (Feb 30)",
+      "value": 72.5,
+      "unit": "kg",
+      "effectiveDate": "2000-02-30",
+      "category": "vital",
+      "confidence": 0.9
+    },
+    {
+      "loinc": "1742-6",
+      "display": "ISO invalid day (Feb 30)",
+      "value": 22,
+      "unit": "U/L",
+      "effectiveDate": "2000-02-30T08:00:00Z",
+      "category": "lab",
+      "confidence": 0.8
+    }
+  ]
+}

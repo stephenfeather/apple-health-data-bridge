@@ -116,25 +116,85 @@ public enum LLMResponseContract {
 
     // MARK: - Date parsing (UTC; date-only -> UTC midnight)
 
-    private static let utcDateOnly: DateFormatter = {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
-
+    /// Parse an ISO-8601 / `yyyy-MM-dd` date from untrusted LLM output.
+    ///
+    /// `Calendar.date(from:)` and the date formatters SILENTLY NORMALIZE out-of-range components
+    /// (e.g. `2000-02-30` -> 2000-03-01) instead of failing — the same integrity bug M2 fixed on the
+    /// C-CDA HL7-TS path (`CCDAParser.date(fromHL7TS:)`). To honor "validate, don't trust", we parse
+    /// components manually and ROUND-TRIP through the same UTC/fixed-offset Gregorian calendar,
+    /// rejecting (→ nil → `Skip(.noDate)`) if any component changed. Fixed offsets have no DST, so
+    /// there are no false negatives.
     private static func parseDate(_ s: String) -> Date? {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.isEmpty { return nil }
-        if t.contains("T") {
-            let iso = ISO8601DateFormatter()
-            iso.formatOptions = [.withInternetDateTime]
-            if let d = iso.date(from: t) { return d }
-            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let d = iso.date(from: t) { return d }
+        guard !t.isEmpty else { return nil }
+
+        // Split the date from an optional time component (ISO "T" or a space separator).
+        let dateStr: Substring
+        var timeStr: Substring?
+        if let sep = t.firstIndex(where: { $0 == "T" || $0 == " " }) {
+            dateStr = t[..<sep]
+            timeStr = t[t.index(after: sep)...]
+        } else {
+            dateStr = t[...]
         }
-        return utcDateOnly.date(from: t)
+
+        // Date: strict, zero-padded yyyy-MM-dd.
+        let d = dateStr.split(separator: "-", omittingEmptySubsequences: false)
+        guard d.count == 3,
+              let year = intExactWidth(d[0], 4),
+              let month = intExactWidth(d[1], 2),
+              let day = intExactWidth(d[2], 2) else { return nil }
+
+        var c = DateComponents()
+        c.year = year; c.month = month; c.day = day
+        var tz = TimeZone(identifier: "UTC")!
+
+        if let timeStr {
+            guard let parsed = parseTime(timeStr) else { return nil }
+            c.hour = parsed.h; c.minute = parsed.m; c.second = parsed.s; tz = parsed.tz
+        } else {
+            c.hour = 0; c.minute = 0; c.second = 0   // date-only -> UTC midnight
+        }
+
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tz
+        guard let date = cal.date(from: c) else { return nil }
+        let rt = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        guard rt.year == c.year, rt.month == c.month, rt.day == c.day,
+              rt.hour == c.hour, rt.minute == c.minute, rt.second == c.second else { return nil }
+        return date
+    }
+
+    /// `HH:mm[:ss[.frac]]` plus optional `Z` / `±HH:mm` / `±HHmm` offset. Strict, zero-padded fields.
+    private static func parseTime(_ s: Substring) -> (h: Int, m: Int, s: Int, tz: TimeZone)? {
+        var body = String(s)
+        var tz = TimeZone(identifier: "UTC")!
+        if body.hasSuffix("Z") || body.hasSuffix("z") {
+            body.removeLast()
+        } else if let r = body.range(of: #"[+-]\d{2}:?\d{2}$"#, options: .regularExpression) {
+            let off = body[r]
+            let sign = off.first == "-" ? -1 : 1
+            let digits = off.dropFirst().filter { $0.isNumber }
+            guard digits.count == 4, let oh = Int(digits.prefix(2)), let om = Int(digits.suffix(2)),
+                  let z = TimeZone(secondsFromGMT: sign * (oh * 3600 + om * 60)) else { return nil }
+            tz = z
+            body.removeSubrange(r)
+        }
+        let p = body.split(separator: ":", omittingEmptySubsequences: false)
+        guard p.count == 2 || p.count == 3,
+              let h = intExactWidth(p[0], 2),
+              let m = intExactWidth(p[1], 2) else { return nil }
+        var sec = 0
+        if p.count == 3 {
+            let secPart = p[2].split(separator: ".").first ?? p[2]   // tolerate fractional seconds
+            guard let s2 = intExactWidth(secPart, 2) else { return nil }
+            sec = s2
+        }
+        return (h, m, sec, tz)
+    }
+
+    private static func intExactWidth(_ s: Substring, _ width: Int) -> Int? {
+        guard s.count == width, s.allSatisfy({ $0.isNumber }) else { return nil }
+        return Int(s)
     }
 }

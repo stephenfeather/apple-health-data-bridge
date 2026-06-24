@@ -92,6 +92,22 @@ final class LLMResponseContractTests: XCTestCase {
         XCTAssertEqual(r.skipped.count, 2)
     }
 
+    /// An out-of-range day (Feb 30) must be REJECTED, NOT silently rolled forward to 2000-03-01 —
+    /// same integrity guard M2 added on the C-CDA HL7-TS path. Covers BOTH the date-only and the
+    /// ISO-8601 ("T") paths.
+    func testOutOfRangeDateRejectedNotNormalized() throws {
+        let r = try LLMResponseContract.decode(try fixtureText("llm-response-bad-date"), subjectId: "s")
+        XCTAssertEqual(r.observations.count, 0)             // NOT 2 observations dated 2000-03-01
+        XCTAssertEqual(r.skipped.count, 2)
+        XCTAssertTrue(r.skipped.allSatisfy { $0.reason == .noDate }, "both bad dates -> .noDate")
+    }
+
+    func testEmptyObjectDecodesToEmptyResult() throws {
+        let r = try LLMResponseContract.decode("{}", subjectId: "s")
+        XCTAssertEqual(r.observations.count, 0)
+        XCTAssertEqual(r.skipped.count, 0)
+    }
+
     func testValidResponseProducesObservations() throws {
         let r = try LLMResponseContract.decode(try fixtureText("llm-response-valid"), subjectId: "s")
         let vital = try XCTUnwrap(r.observations.first { $0.category == .vital })
