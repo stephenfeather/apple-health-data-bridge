@@ -37,7 +37,7 @@ enum Provider: String, Equatable {
     case anthropic, openai
     var envVar: String { self == .anthropic ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY" }
     /// Current default model id per provider (D6); overridable via `--model`. Confirmed at the live smoke.
-    var defaultModel: String { self == .anthropic ? "claude-opus-4-8" : "gpt-4.1" }
+    var defaultModel: String { self == .anthropic ? "claude-opus-4-8" : "gpt-5.5" }
     var engine: String { self == .anthropic ? "anthropic-llm" : "openai-llm" }
 }
 
