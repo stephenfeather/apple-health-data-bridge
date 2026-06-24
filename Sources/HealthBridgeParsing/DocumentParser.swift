@@ -4,7 +4,7 @@ import BridgeKit
 public enum ParseError: Error, Equatable { case unrecognizedFormat; case malformed(String) }
 
 public struct Skip: Equatable, Sendable {
-    public enum Reason: Equatable, Sendable { case noCode, noDate, unrepresentableValue, negated }
+    public enum Reason: Equatable, Sendable { case noCode, noDate, unrepresentableValue, negated, implausibleDate }
     public let reason: Reason
     public let label: String
     public init(reason: Reason, label: String) { self.reason = reason; self.label = label }

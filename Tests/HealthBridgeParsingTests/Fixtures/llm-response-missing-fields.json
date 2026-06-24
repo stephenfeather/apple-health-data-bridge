@@ -1,0 +1,29 @@
+{
+  "patients": [ { "name": "Jane Public", "dob": "2000-01-01" } ],
+  "observations": [
+    {
+      "display": "Missing LOINC",
+      "value": 5.0,
+      "unit": "kg",
+      "effectiveDate": "2024-01-15",
+      "category": "vital",
+      "confidence": 0.9
+    },
+    {
+      "loinc": "29463-7",
+      "display": "Missing date",
+      "value": 72.5,
+      "unit": "kg",
+      "category": "vital",
+      "confidence": 0.9
+    },
+    {
+      "loinc": "1742-6",
+      "display": "Missing value",
+      "unit": "U/L",
+      "effectiveDate": "2024-01-15",
+      "category": "lab",
+      "confidence": 0.8
+    }
+  ]
+}
