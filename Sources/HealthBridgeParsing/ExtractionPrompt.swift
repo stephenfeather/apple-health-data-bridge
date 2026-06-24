@@ -36,7 +36,7 @@ public enum ExtractionPrompt {
               "value": <number>,            // numeric result; OR use "valueText" for qualitative
               "valueText": <string>,        // qualitative result; provide exactly one of value/valueText
               "unit": <string UCUM unit or null>,
-              "effectiveDate": <string ISO-8601 or yyyy-mm-dd>,
+              "effectiveDate": <string ISO-8601 or yyyy-mm-dd, or null if the document gives no date>,
               "category": <"vital" | "lab" | "other">,
               "confidence": <number 0..1>,  // your honest certainty for THIS entry
               "page": <integer page number or null>,
@@ -48,7 +48,9 @@ public enum ExtractionPrompt {
         Rules:
         - Set "confidence" honestly to reflect how certain you are of each entry; OMIT any entry you are \
         uncertain about rather than guessing.
-        - Provide a real LOINC code in "loinc" and a real "effectiveDate"; omit entries that lack them.
+        - Provide a real LOINC code in "loinc"; omit any observation you cannot assign a real LOINC code.
+        - If an observation has no date in the document, set "effectiveDate" to null — NEVER guess, infer \
+        from the patient's DOB, use today's date, or otherwise fabricate a date.
         - List every distinct patient you find in "patients" (used for a single-subject safety check).
 
         BEGIN DOCUMENT

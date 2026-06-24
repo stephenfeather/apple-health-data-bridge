@@ -70,6 +70,15 @@ final class LLMResponseContractTests: XCTestCase {
         XCTAssertTrue(p.contains("ALT 22 U/L"))
     }
 
+    /// Contract honesty: the prompt must tell the model to set effectiveDate to null when absent and
+    /// NEVER fabricate a date (structured outputs can't honor "omit a required field").
+    func testPromptInstructsNullForMissingDateNeverFabricate() {
+        let p = ExtractionPrompt.make(pages: ["x"]).lowercased()
+        XCTAssertTrue(p.contains("fabricate"), "must forbid fabricating a date")
+        XCTAssertTrue(p.contains("effectivedate") && p.contains("to null"),
+                      "must instruct setting effectiveDate to null for a missing date")
+    }
+
     // MARK: - LLMResponseContract.decode (untrusted output — error handlers first)
 
     func testMalformedJSONThrows() {
@@ -106,6 +115,20 @@ final class LLMResponseContractTests: XCTestCase {
         let r = try LLMResponseContract.decode("{}", subjectId: "s")
         XCTAssertEqual(r.observations.count, 0)
         XCTAssertEqual(r.skipped.count, 0)
+    }
+
+    /// Regression pin: with a nullable effectiveDate, a model that honestly reports a missing date as
+    /// `null` (or "") must map to Skip(.noDate) — NOT a fabricated/normalized Observation.
+    func testNullOrEmptyEffectiveDateSkipped() throws {
+        let nullDate = #"{"observations":[{"loinc":"29463-7","display":"W","value":72.5,"unit":"kg","effectiveDate":null,"category":"vital","confidence":0.9}]}"#
+        let r1 = try LLMResponseContract.decode(nullDate, subjectId: "s")
+        XCTAssertEqual(r1.observations.count, 0)
+        XCTAssertTrue(r1.skipped.contains { $0.reason == .noDate })
+
+        let emptyDate = #"{"observations":[{"loinc":"29463-7","display":"W","value":72.5,"unit":"kg","effectiveDate":"","category":"vital","confidence":0.9}]}"#
+        let r2 = try LLMResponseContract.decode(emptyDate, subjectId: "s")
+        XCTAssertEqual(r2.observations.count, 0)
+        XCTAssertTrue(r2.skipped.contains { $0.reason == .noDate })
     }
 
     func testValidResponseProducesObservations() throws {

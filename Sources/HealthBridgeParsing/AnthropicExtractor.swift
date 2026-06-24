@@ -71,7 +71,13 @@ public struct AnthropicExtractor: LLMExtractor {
                         "value": ["type": ["number", "null"]],
                         "valueText": ["type": ["string", "null"]],
                         "unit": ["type": ["string", "null"]],
-                        "effectiveDate": ["type": "string"],
+                        // Nullable so a model signals a MISSING date as null (→ decoder Skip(.noDate))
+                        // instead of being forced by a required+non-nullable field to FABRICATE one
+                        // (observed: gpt-4.1/gpt-5.5 emitted a DOB/today's date on a dateless PDF;
+                        // claude-opus-4-8 honestly emitted ""). Kept in `required`. Uses anyOf because
+                        // Anthropic structured outputs rejects nullable type-unions while OpenAI strict
+                        // accepts anyOf too — so the single shared schema fixes both providers.
+                        "effectiveDate": ["anyOf": [["type": "string"], ["type": "null"]]],
                         "category": ["type": "string"],
                         "confidence": ["type": "number"],
                         "page": ["type": ["integer", "null"]],
