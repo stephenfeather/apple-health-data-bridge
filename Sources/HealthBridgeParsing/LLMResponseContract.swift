@@ -68,10 +68,23 @@ public enum LLMResponseContract {
     /// multi-patient refusal). The CLI compares this — UNTRUSTED, model-extracted — identity against
     /// the bound subject (the best available document-identity signal for an opaque PDF). `nil` when the
     /// response reports no patient. Empty name/dob propagate (→ the comparator's `.incomplete`).
+    ///
+    /// We return the first IDENTIFIABLE patient — the first for which `patientKey` is non-nil (has a
+    /// name token OR a non-empty dob) — rather than blindly `patients.first`. A model that emits a BLANK
+    /// placeholder (`{"name":"","dob":""}`) BEFORE a real, mismatched identity would otherwise mask that
+    /// identity: `distinctPatientCount` ignores the blank (multi-patient refusal passes) while
+    /// `patients.first` surfaced the blank, downgrading the comparator from `.mismatch` (→ `--force`) to
+    /// `.incomplete` (→ weaker `--allow-unverified-subject`). Because `PDFExtractor` already refuses when
+    /// `distinctPatientCount > 1`, there is at most ONE keyed identity here, so "first identifiable" is
+    /// unambiguous. When every entry is blank/unkeyed we fall back to the first entry's (name, dob) —
+    /// i.e. ("",""), preserving the conservative `.incomplete` classification.
     public static func extractedPatient(_ jsonText: String) throws -> (name: String, dob: String)? {
         let env = try decodeEnvelope(jsonText)
-        guard let first = (env.patients ?? []).first else { return nil }
-        return (first.name ?? "", first.dob ?? "")
+        let patients = env.patients ?? []
+        guard let chosen = patients.first(where: { patientKey($0) != nil }) ?? patients.first else {
+            return nil
+        }
+        return (chosen.name ?? "", chosen.dob ?? "")
     }
 
     private static func decodeEnvelope(_ jsonText: String) throws -> Envelope {

@@ -203,6 +203,28 @@ final class LLMResponseContractTests: XCTestCase {
         XCTAssertNil(try LLMResponseContract.extractedPatient(#"{"observations":[]}"#))
     }
 
+    func testExtractedPatientNilWhenPatientsEmpty() throws {   // explicit empty patients[] → nil
+        XCTAssertNil(try LLMResponseContract.extractedPatient(#"{"patients":[],"observations":[]}"#))
+    }
+
+    /// C1 (wrong-patient binding): a blank placeholder patient BEFORE a real keyed identity must NOT
+    /// mask the real identity. `distinctPatientCount` ignores the blank (so the multi-patient refusal
+    /// passes), but `extractedPatient` must surface the IDENTIFIABLE patient so the comparator sees the
+    /// real mismatch (→ stronger `--force`), not the blank's weaker `.incomplete` (→ `--allow-unverified`).
+    func testExtractedPatientSkipsBlankPlaceholderBeforeRealIdentity() throws {
+        let json = #"{"patients":[{"name":"","dob":""},{"name":"Eve Wrong","dob":"1990-01-01"}],"observations":[]}"#
+        let p = try LLMResponseContract.extractedPatient(json)
+        XCTAssertEqual(p?.name, "Eve Wrong")
+        XCTAssertEqual(p?.dob, "1990-01-01")
+    }
+
+    func testExtractedPatientAllBlankReturnsBlank() throws {   // all unkeyed → conservative ("","")
+        let json = #"{"patients":[{"name":"","dob":""},{"name":"","dob":""}],"observations":[]}"#
+        let p = try LLMResponseContract.extractedPatient(json)
+        XCTAssertEqual(p?.name, "")
+        XCTAssertEqual(p?.dob, "")
+    }
+
     func testIsPlausibleObservationDateHelper() {
         let dob = Self.dobJane, now = Self.fixedNow
         XCTAssertFalse(LLMResponseContract.isPlausibleObservationDate(LLMResponseContract.parseDate("1995-06-01")!, dob: dob, now: now))
