@@ -3,8 +3,10 @@ import HealthBridgeParsing
 
 // MARK: - Opt-in raw-response eval logging (#4)
 //
-// PHI-safe, OFF by default. Captures the model's raw reply (the OUTPUT contract JSON) plus
-// content-SHA-only input reference for offline eval. NEVER stores page/prompt text or the API key.
+// OFF by default. The INPUT is referenced by content-SHA only — NEVER page/prompt text or the API
+// key. The captured raw model reply (the OUTPUT contract JSON) MAY contain PHI (e.g. patient
+// name/dob and snippets), so the log is NOT unconditionally "PHI-safe": it is kept local,
+// gitignored, and nukable per the issue's data-handling contract.
 // The pure halves (`rawLoggingEnabled`, `RawResponseLog.encodeEntry`, `rawResponseLogURL`) are
 // unit-tested without disk; `RawResponseLog.append` is the lone side effect, at the CLI edge.
 
@@ -65,12 +67,15 @@ enum RawResponseLog {
         let fm = FileManager.default
         try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let line = Data((entry + "\n").utf8)
-        if let handle = try? FileHandle(forWritingTo: url) {
+        if fm.fileExists(atPath: url.path) {
+            // Existing log: open for writing and append. Let any handle-open error THROW —
+            // never fall back to a clobbering atomic write that would destroy prior entries.
+            let handle = try FileHandle(forWritingTo: url)
             defer { try? handle.close() }
             try handle.seekToEnd()
             try handle.write(contentsOf: line)
         } else {
-            try line.write(to: url, options: .atomic)
+            try line.write(to: url, options: .atomic)   // create new file
         }
     }
 }

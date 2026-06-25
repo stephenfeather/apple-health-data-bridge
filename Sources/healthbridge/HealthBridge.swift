@@ -191,7 +191,8 @@ struct Parse: AsyncParsableCommand {
     @ArgumentParser.Flag(name: .long) var quiet = false
     @ArgumentParser.Flag(name: .long, help: "Proceed despite a Patient mismatch.") var force = false
     @ArgumentParser.Flag(name: .long, help: "Proceed when the Patient is present but unverifiable.") var allowUnverifiedSubject = false
-    // #4: opt-in PHI-safe raw-response logging for offline eval. Also enabled by
+    // #4: opt-in raw-response logging for offline eval (content-SHA-only input ref; the captured
+    // raw model reply may contain PHI, so the log stays local/gitignored/nukable). Also enabled by
     // HEALTHBRIDGE_LOG_RAW_RESPONSES=1|true or config raw_response_log=true. OFF by default.
     @ArgumentParser.Flag(name: .long, help: "PDF only: append the model's raw response to a local eval log (off by default).") var logRawResponses = false
 
@@ -325,7 +326,7 @@ struct Parse: AsyncParsableCommand {
                                      settings: Settings, logPathOverride: String?) {
         let apiVersion = provider == .anthropic ? AnthropicExtractor.anthropicVersion : nil
         let entry = RawResponseLog.encodeEntry(
-            timestamp: ISO8601DateFormatter().string(from: Date()),
+            timestamp: Date().ISO8601Format(),
             contentSHA256: sha, provider: provider.rawValue, model: model,
             apiVersion: apiVersion, meta: meta, rawResponse: rawResponse)
         let url = rawResponseLogURL(dataRoot: settings.dataRoot, override: logPathOverride)

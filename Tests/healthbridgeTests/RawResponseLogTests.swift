@@ -3,7 +3,8 @@ import HealthBridgeConfig
 import HealthBridgeParsing
 @testable import healthbridge
 
-/// #4 — opt-in, PHI-safe raw-response logging for offline eval.
+/// #4 — opt-in raw-response logging for offline eval (content-SHA-only input ref; raw model
+/// reply may contain PHI, kept local/gitignored/nukable per the data-handling contract).
 /// Pure enable-resolution + pure JSON-line encoding are tested without disk;
 /// a hermetic temp-dir round-trip covers the append side effect.
 final class RawResponseLogEnableTests: XCTestCase {
@@ -136,6 +137,25 @@ final class RawResponseLogAppendTests: XCTestCase {
         XCTAssertEqual(lines.count, 2)
         XCTAssertTrue(contents.contains("\"rawResponse\":\"a\""))
         XCTAssertTrue(contents.contains("\"rawResponse\":\"b\""))
+    }
+
+    /// Regression: appending to a pre-existing file must NEVER clobber prior content.
+    /// Pre-seed with a hand-written first line, append a second, and assert BOTH lines
+    /// survive in order — guarding against the destructive atomic-create fallback.
+    func testAppendToExistingFilePreservesPriorContent() throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("raw-responses.jsonl")
+        let firstLine = "{\"rawResponse\":\"preexisting\"}\n"
+        try firstLine.write(to: file, atomically: true, encoding: .utf8)
+
+        try RawResponseLog.append(entry: line("appended"), to: file)
+
+        let contents = try String(contentsOf: file, encoding: .utf8)
+        let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertEqual(String(lines[0]), "{\"rawResponse\":\"preexisting\"}")  // not clobbered
+        XCTAssertTrue(String(lines[1]).contains("\"rawResponse\":\"appended\""))
+        XCTAssertTrue(contents.hasSuffix("\n"))
     }
 }
 

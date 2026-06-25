@@ -21,7 +21,8 @@ public struct Config: Codable, Equatable, Sendable {
     public var dataRoot: String?
     public var defaultSubject: String?
     public var logLevel: String?
-    /// #4 opt-in raw-response logging (PHI-safe offline eval capture). Nil/absent = OFF (default).
+    /// #4 opt-in raw-response logging: content-SHA-only input ref; the captured raw model reply may
+    /// contain PHI, so the log is kept local/gitignored/nukable. Nil/absent = OFF (default).
     public var rawResponseLog: Bool?
     /// #4 optional override for the JSONL log path (else `<dataRoot>/raw-responses.jsonl`).
     public var rawResponseLogPath: String?
