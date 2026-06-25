@@ -41,3 +41,8 @@ samples/private/
 # but defend against an in-repo dataRoot.
 raw-responses.jsonl
 raw-responses/
+
+# bridge-eval harness — synthetic fixtures are committed in Tests/; these are the
+# local-only Tier B real-PHI fixtures and run artifacts. Never commit.
+eval/fixtures/
+eval/runs/

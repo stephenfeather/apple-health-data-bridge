@@ -30,6 +30,13 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
+        .executableTarget(
+            name: "bridge-eval",
+            dependencies: [
+                "HealthBridgeParsing", "BridgeKit",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ]
+        ),
         .testTarget(name: "BridgeKitTests", dependencies: ["BridgeKit"]),
         .testTarget(name: "HealthBridgeConfigTests", dependencies: ["HealthBridgeConfig"]),
         .testTarget(
@@ -40,6 +47,11 @@ let package = Package(
         .testTarget(
             name: "healthbridgeTests",
             dependencies: ["healthbridge", "BridgeKit", "HealthBridgeConfig"],
+            resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "BridgeEvalTests",
+            dependencies: ["bridge-eval", "HealthBridgeParsing", "BridgeKit"],
             resources: [.copy("Fixtures")]
         ),
         // healthbridgeTests in Task 9. A test target with no .swift sources fails to build,
