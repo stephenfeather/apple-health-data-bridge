@@ -1,0 +1,11 @@
+{
+  "patients": [
+    { "name": "Jane Public", "dob": "1990-05-01" }
+  ],
+  "observations": [
+    { "loinc": "8867-4", "display": "Heart rate", "value": 72.5, "valueText": null,
+      "unit": "/min", "effectiveDate": "2024-01-15", "category": "vital" },
+    { "loinc": "8480-6", "display": "Systolic blood pressure", "value": 118, "valueText": null,
+      "unit": "mm[Hg]", "effectiveDate": "2024-01-15", "category": "vital" }
+  ]
+}
