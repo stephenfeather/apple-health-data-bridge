@@ -1,20 +1,17 @@
 import Foundation
+import ArgumentParser
 
-/// bridge-eval — dev-only LLM-extraction evaluation harness. NOT shipped in `healthbridge`.
-/// The real `@main AsyncParsableCommand` root + run/score/report subcommands are wired in Task 13;
-/// this file currently holds the version stub plus a TEMPORARY `@main` entry point.
-enum BridgeEvalVersion {
-    static let current = "0.1.0"
+/// bridge-eval — dev-only LLM-extraction evaluation harness (design §3). NOT in `products`, so it never
+/// ships in `healthbridge`. Three subcommands: `run` (network, macOS-guarded), `score` (pure offline
+/// rescore), `report` (pure aggregate). No iterate/research loop in v1 (design §11–12).
+@main
+struct BridgeEval: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "bridge-eval",
+        abstract: "Evaluate LLM PDF-extraction responses against gold fixtures.",
+        subcommands: [RunCommand.self, ScoreCommand.self, ReportCommand.self])
 }
 
-/// TEMPORARY entry point. An `executableTarget` with more than one source file (added from Task 2
-/// on) must declare an explicit `@main`/`main.swift` — SwiftPM only treats a *single-file* executable
-/// as an implicit script. Without this, `swift build`/`swift test` fail to link the product
-/// (`_bridge_eval_main` undefined). Task 13 REPLACES this with the real ArgumentParser command root.
-@main
-struct BridgeEvalEntry {
-    static func main() {
-        let msg = "bridge-eval \(BridgeEvalVersion.current): command tree not yet wired (build in progress)\n"
-        FileHandle.standardError.write(Data(msg.utf8))
-    }
+enum BridgeEvalVersion {
+    static let current = "0.1.0"
 }
