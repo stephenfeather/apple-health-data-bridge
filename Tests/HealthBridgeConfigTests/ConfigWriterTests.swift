@@ -15,4 +15,24 @@ final class ConfigWriterTests: XCTestCase {
         XCTAssertEqual(loaded, c)
         try? FileManager.default.removeItem(atPath: (path as NSString).deletingLastPathComponent)
     }
+
+    /// #4 raw-response logging opt-in: the two new optional snake_case fields round-trip through TOML.
+    func testRawResponseLogFieldsRoundTrip() throws {
+        let path = tmpPath()
+        let c = Config(dataRoot: "~/Documents/x", rawResponseLog: true,
+                       rawResponseLogPath: "~/logs/raw.jsonl")
+        try ConfigWriter.write(c, path: path)
+        let loaded = try XCTUnwrap(ConfigLoader.load(path: path))
+        XCTAssertEqual(loaded.rawResponseLog, true)
+        XCTAssertEqual(loaded.rawResponseLogPath, "~/logs/raw.jsonl")
+        XCTAssertEqual(loaded, c)
+        try? FileManager.default.removeItem(atPath: (path as NSString).deletingLastPathComponent)
+    }
+
+    /// Default is OFF: absent fields decode to nil (logging disabled).
+    func testRawResponseLogDefaultsNil() {
+        let c = Config()
+        XCTAssertNil(c.rawResponseLog)
+        XCTAssertNil(c.rawResponseLogPath)
+    }
 }

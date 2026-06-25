@@ -21,11 +21,19 @@ public struct Config: Codable, Equatable, Sendable {
     public var dataRoot: String?
     public var defaultSubject: String?
     public var logLevel: String?
+    /// #4 opt-in raw-response logging: content-SHA-only input ref; the captured raw model reply may
+    /// contain PHI, so the log is kept local/gitignored/nukable. Nil/absent = OFF (default).
+    public var rawResponseLog: Bool?
+    /// #4 optional override for the JSONL log path (else `<dataRoot>/raw-responses.jsonl`).
+    public var rawResponseLogPath: String?
     public var subjects: [SubjectEntry]
     public init(dataRoot: String? = nil, defaultSubject: String? = nil,
-                logLevel: String? = nil, subjects: [SubjectEntry] = []) {
+                logLevel: String? = nil, rawResponseLog: Bool? = nil,
+                rawResponseLogPath: String? = nil, subjects: [SubjectEntry] = []) {
         self.dataRoot = dataRoot; self.defaultSubject = defaultSubject
-        self.logLevel = logLevel; self.subjects = subjects
+        self.logLevel = logLevel
+        self.rawResponseLog = rawResponseLog; self.rawResponseLogPath = rawResponseLogPath
+        self.subjects = subjects
     }
     public mutating func addSubject(_ entry: SubjectEntry) throws {
         if subjects.contains(where: { $0.key == entry.key }) { throw ConfigError.duplicateKey(entry.key) }
@@ -36,5 +44,7 @@ public struct Config: Codable, Equatable, Sendable {
         case dataRoot = "data_root"
         case defaultSubject = "default_subject"
         case logLevel = "log_level"
+        case rawResponseLog = "raw_response_log"
+        case rawResponseLogPath = "raw_response_log_path"
     }
 }

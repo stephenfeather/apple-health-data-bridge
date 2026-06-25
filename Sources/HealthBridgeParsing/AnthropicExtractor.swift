@@ -22,7 +22,8 @@ import FoundationNetworking
 /// never placed in an error string.
 public struct AnthropicExtractor: LLMExtractor {
     /// Anthropic Messages API version header. Confirmed current (D6).
-    static let anthropicVersion = "2023-06-01"
+    /// Public so the CLI can stamp it into the #4 raw-response eval log.
+    public static let anthropicVersion = "2023-06-01"
     static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
     static let maxTokens = 4096
     /// D5: bounded retry on transient failures; real exponential backoff deferred.

@@ -47,7 +47,8 @@ public struct PDFExtractor {
         // deferred (#3): truncation-as-error
         let result = try LLMResponseContract.decode(raw.jsonText, subjectId: subjectId,
                                                     subjectDOB: subjectDOB, now: now)   // ParseError on malformed
-        return PDFExtraction(result: result, extractedPatient: patient, meta: raw.meta)
+        return PDFExtraction(result: result, extractedPatient: patient, meta: raw.meta,
+                             rawResponse: raw.jsonText)
     }
     #endif
 }
@@ -59,10 +60,14 @@ public struct PDFExtraction {
     public let extractedPatient: (name: String, dob: String)?
     /// Provider response meta (#3) — additive observability for the CLI verbose log; nil when absent.
     public let meta: LLMResponseMeta?
+    /// The model's raw reply text (#4) — surfaced verbatim so the CLI can persist it to the eval log.
+    /// This is the model OUTPUT (the contract JSON it returned), not page/prompt text.
+    public let rawResponse: String
     public init(result: ParseResult, extractedPatient: (name: String, dob: String)?,
-                meta: LLMResponseMeta? = nil) {
+                meta: LLMResponseMeta? = nil, rawResponse: String = "") {
         self.result = result
         self.extractedPatient = extractedPatient
         self.meta = meta
+        self.rawResponse = rawResponse
     }
 }

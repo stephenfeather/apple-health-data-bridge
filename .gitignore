@@ -37,3 +37,7 @@ opencode.jsonc
 # Local clinical sample data — PHI must never be committed
 samples/private/
 *.bridge.json
+# Raw-response eval log (#4): local + nukable; default lives under dataRoot (outside the repo),
+# but defend against an in-repo dataRoot.
+raw-responses.jsonl
+raw-responses/
