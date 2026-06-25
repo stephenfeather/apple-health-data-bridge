@@ -34,27 +34,39 @@ enum Matcher {
         }
     }
 
+    /// True iff this predicted obs grades as a FULL exact match against `e` (value + unit + category all
+    /// correct). The date is already pinned by the shared identity key, so it never contributes an error.
+    private static func isExactMatch(_ p: Observation, _ e: ExpectedObservation) -> Bool {
+        gradeValue(predicted: p.value, expected: e)
+            && (p.unit ?? "") == (e.unit ?? "")
+            && p.category.rawValue == e.category
+    }
+
     static func match(predicted: [Observation], expected: [ExpectedObservation]) -> [MatchRecord] {
-        // Index expected by identity; allow at most one match per expected entry. An expected date that
-        // the production parser rejects drops out of the index (it can only ever be a miss).
-        var expectedByKey: [Key: ExpectedObservation] = [:]
-        var unmatchedExpected = Set<Key>()
+        // Index expected by identity. Multiple expected entries may share a (loinc, UTC day) key, so each
+        // key holds ALL candidates (Finding 1) — overwriting would silently drop duplicates. An expected
+        // date the production parser rejects drops out of the index (it can only ever be a miss).
+        var expectedByKey: [Key: [ExpectedObservation]] = [:]
         for e in expected {
             guard let d = LLMResponseContract.parseDate(e.effectiveDate) else { continue }
             let k = Key(loinc: e.loinc, day: utcDay(d))
-            expectedByKey[k] = e
-            unmatchedExpected.insert(k)
+            expectedByKey[k, default: []].append(e)
         }
 
         var records: [MatchRecord] = []
         for p in predicted {
             let loinc = p.code?.code ?? ""
             let k = Key(loinc: loinc, day: utcDay(p.effectiveDate))
-            guard let e = expectedByKey[k], unmatchedExpected.contains(k) else {
+            guard var candidates = expectedByKey[k], !candidates.isEmpty else {
                 records.append(MatchRecord(loinc: loinc, outcome: .hallucinated, fieldErrors: nil))
                 continue
             }
-            unmatchedExpected.remove(k)
+            // Prefer a candidate that grades as a full exact match; otherwise take the first. The chosen
+            // candidate is consumed so a later prediction can't reuse it.
+            let chosenIndex = candidates.firstIndex(where: { isExactMatch(p, $0) }) ?? candidates.startIndex
+            let e = candidates.remove(at: chosenIndex)
+            if candidates.isEmpty { expectedByKey[k] = nil } else { expectedByKey[k] = candidates }
+
             let valueWrong = !gradeValue(predicted: p.value, expected: e)
             let unitWrong = (p.unit ?? "") != (e.unit ?? "")
             let categoryWrong = p.category.rawValue != e.category
@@ -68,8 +80,11 @@ enum Matcher {
             }
         }
 
-        for k in unmatchedExpected {
-            records.append(MatchRecord(loinc: k.loinc, outcome: .missedAbsent, fieldErrors: nil))
+        // Every gold candidate left unconsumed across all keys is one missed-absent record.
+        for (k, leftovers) in expectedByKey {
+            for _ in leftovers {
+                records.append(MatchRecord(loinc: k.loinc, outcome: .missedAbsent, fieldErrors: nil))
+            }
         }
         return records
     }

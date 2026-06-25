@@ -21,8 +21,9 @@ final class ArtifactWriterTests: XCTestCase {
 
     func testWriteAndReadbackManifest() throws {
         let runDir = tempRunDir()
-        let manifest = Manifest(timestamp: "2026-06-25T00:00:00Z", promptHashes: ["abc"],
-                                models: ["m"], sampleCount: 1, fixtureNames: ["vitals-basic"])
+        let manifest = Manifest(timestamp: "2026-06-25T00-00-00Z", referenceDateISO: "2026-06-25T00:00:00Z",
+                                promptHashes: ["abc"], models: ["m"], sampleCount: 1,
+                                fixtureNames: ["vitals-basic"])
         try ArtifactWriter.writeManifest(manifest, runDir: runDir)
         let data = try Data(contentsOf: runDir.appendingPathComponent("manifest.json"))
         XCTAssertEqual(try JSONDecoder().decode(Manifest.self, from: data), manifest)

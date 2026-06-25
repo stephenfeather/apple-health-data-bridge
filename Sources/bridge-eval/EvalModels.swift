@@ -91,7 +91,9 @@ struct RunResults: Codable, Equatable {
 // MARK: - Provenance / raw
 
 struct Manifest: Codable, Equatable {
-    let timestamp: String
+    let timestamp: String        // filesystem-sanitized run-dir name (colons -> "-"); NOT ISO-parseable
+    let referenceDateISO: String // UNsanitized ISO-8601 instant of the run; the deterministic `now` for
+                                 // offline rescoring (Finding 3) — same Date() that built `timestamp`
     let promptHashes: [String]   // distinct prompt hashes seen across the run — NOT a single value (Fix 5)
     let models: [String]
     let sampleCount: Int

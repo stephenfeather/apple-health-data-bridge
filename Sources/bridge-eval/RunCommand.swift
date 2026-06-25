@@ -65,7 +65,11 @@ struct RunCommand: AsyncParsableCommand {
 
         let extractor = try makeExtractor()
         let cases = try Fixtures.discoverCases(root: fixtures)
-        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        // ONE instant drives both the (sanitized) run-dir name and the manifest's parseable reference
+        // date used for deterministic offline rescoring (Finding 3).
+        let runInstant = Date()
+        let referenceDateISO = ISO8601DateFormatter().string(from: runInstant)
+        let timestamp = referenceDateISO.replacingOccurrences(of: ":", with: "-")
         let dir = ArtifactWriter.runDir(runsRoot: runsRoot, timestamp: timestamp)
 
         // Pre-pass: read each fixture's pages ONCE, compute its prompt hash, and keep pages for the loop.
@@ -83,8 +87,9 @@ struct RunCommand: AsyncParsableCommand {
         }
         let promptHashes = promptHashSet.sorted()
 
-        let manifest = Manifest(timestamp: timestamp, promptHashes: promptHashes,
-                                models: models, sampleCount: samples, fixtureNames: cases)
+        let manifest = Manifest(timestamp: timestamp, referenceDateISO: referenceDateISO,
+                                promptHashes: promptHashes, models: models, sampleCount: samples,
+                                fixtureNames: cases)
         try ArtifactWriter.writeManifest(manifest, runDir: dir)   // BEFORE the loop (Fix 4)
 
         var allScores: [CaseScore] = []
@@ -114,7 +119,10 @@ struct RunCommand: AsyncParsableCommand {
 
     #if canImport(PDFKit) && os(macOS)
     private func makeExtractor() throws -> any LLMExtractor {
-        let envKey = ProcessInfo.processInfo.environment[provider == "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"]
+        // Normalize ONCE so the env-key lookup and the provider switch agree (e.g. `--provider OpenAI`
+        // must read OPENAI_API_KEY, not ANTHROPIC_API_KEY).
+        let isOpenAI = provider.lowercased() == "openai"
+        let envKey = ProcessInfo.processInfo.environment[isOpenAI ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"]
         guard let key = apiKey ?? envKey else {
             throw ValidationError("missing API key — pass --api-key or set the provider env var")
         }

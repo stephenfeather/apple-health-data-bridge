@@ -41,9 +41,13 @@ final class EvalModelsTests: XCTestCase {
     }
 
     func testManifestAndRawArtifactRoundTrip() throws {
-        let m = Manifest(timestamp: "2026-06-25T00:00:00Z", promptHashes: ["abc", "xyz"],
-                         models: ["m1", "m2"], sampleCount: 3, fixtureNames: ["f1"])
+        let m = Manifest(timestamp: "2026-06-25T10-47-37Z", referenceDateISO: "2026-06-25T10:47:37Z",
+                         promptHashes: ["abc", "xyz"], models: ["m1", "m2"], sampleCount: 3,
+                         fixtureNames: ["f1"])
         XCTAssertEqual(try roundTrip(m), m)
+        // referenceDateISO must survive UNsanitized so ISO8601DateFormatter can parse it (Finding 3).
+        XCTAssertEqual(try roundTrip(m).referenceDateISO, "2026-06-25T10:47:37Z")
+        XCTAssertNotNil(ISO8601DateFormatter().date(from: try roundTrip(m).referenceDateISO))
         let raw = RawArtifact(key: "abc__m1__f1__0", promptHash: "abc", inputHash: "def",
                               model: "m1", fixture: "f1", sample: 0, jsonText: "{}",
                               inputTokens: 10, outputTokens: 20, stopReason: "stop", latencyMillis: 1234)

@@ -110,4 +110,67 @@ final class MatcherTests: XCTestCase {
         let records = Matcher.match(predicted: preds, expected: exp)
         XCTAssertEqual(Set(records.map { $0.outcome }), [.hallucinated, .missedAbsent])
     }
+
+    func testTwoSameKeyGoldBothMatchedAreBothHits() {
+        // Two gold entries share (loinc, same UTC day) but differ in value; two predictions match each.
+        // Both must grade .hit — neither gold dropped, no hallucination (Finding 1).
+        let preds = [
+            observation(loinc: "8867-4", value: .quantity(72), unit: "/min",
+                        date: "2024-01-15", category: .vital),
+            observation(loinc: "8867-4", value: .quantity(80), unit: "/min",
+                        date: "2024-01-15", category: .vital),
+        ]
+        let exp = [
+            expected(loinc: "8867-4", value: 72, valueText: nil, unit: "/min",
+                     date: "2024-01-15", category: "vital"),
+            expected(loinc: "8867-4", value: 80, valueText: nil, unit: "/min",
+                     date: "2024-01-15", category: "vital"),
+        ]
+        let records = Matcher.match(predicted: preds, expected: exp)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.filter { $0.outcome == .hit }.count, 2)
+        XCTAssertEqual(records.filter { $0.outcome == .hallucinated }.count, 0)
+        XCTAssertEqual(records.filter { $0.outcome == .missedAbsent }.count, 0)
+    }
+
+    func testTwoSameKeyGoldOnlyOneMatchedYieldsHitAndMissedAbsent() {
+        // Two gold at the same key, but only one prediction matches one of them: the matched gold is a
+        // .hit, the leftover gold emits exactly one .missedAbsent, zero hallucinations (Finding 1).
+        let preds = [
+            observation(loinc: "8867-4", value: .quantity(72), unit: "/min",
+                        date: "2024-01-15", category: .vital),
+        ]
+        let exp = [
+            expected(loinc: "8867-4", value: 72, valueText: nil, unit: "/min",
+                     date: "2024-01-15", category: "vital"),
+            expected(loinc: "8867-4", value: 80, valueText: nil, unit: "/min",
+                     date: "2024-01-15", category: "vital"),
+        ]
+        let records = Matcher.match(predicted: preds, expected: exp)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.filter { $0.outcome == .hit }.count, 1)
+        XCTAssertEqual(records.filter { $0.outcome == .missedAbsent }.count, 1)
+        XCTAssertEqual(records.filter { $0.outcome == .hallucinated }.count, 0)
+    }
+
+    func testSameKeyPrefersFullMatchCandidateOverPartial() {
+        // Two gold share a key; one is an exact match for the single prediction, the other only a partial
+        // (wrong value). The matcher must pick the EXACT candidate -> .hit, leaving the other as
+        // .missedAbsent rather than mis-grading the prediction as partial (Finding 1, best-candidate).
+        let preds = [
+            observation(loinc: "8867-4", value: .quantity(72), unit: "/min",
+                        date: "2024-01-15", category: .vital),
+        ]
+        let exp = [
+            expected(loinc: "8867-4", value: 99, valueText: nil, unit: "/min",
+                     date: "2024-01-15", category: "vital"),  // partial only
+            expected(loinc: "8867-4", value: 72, valueText: nil, unit: "/min",
+                     date: "2024-01-15", category: "vital"),  // exact
+        ]
+        let records = Matcher.match(predicted: preds, expected: exp)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.filter { $0.outcome == .hit }.count, 1)
+        XCTAssertEqual(records.filter { $0.outcome == .missedAbsent }.count, 1)
+        XCTAssertEqual(records.filter { $0.outcome == .partial }.count, 0)
+    }
 }

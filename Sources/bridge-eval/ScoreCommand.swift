@@ -35,6 +35,11 @@ struct ScoreCommand: AsyncParsableCommand {
     func run() async throws {
         let dir = URL(fileURLWithPath: runDir)
         let raws = try ArtifactReader.readRaws(runDir: dir)
+        // Determinism (Finding 3): use the manifest's recorded reference instant as `now` so the contract's
+        // plausibility checks (e.g. dateAfterNow) don't depend on wall-clock time. Fall back to Date() only
+        // when the manifest or its parseable referenceDateISO is absent.
+        let referenceDate = (try? ArtifactReader.readManifest(runDir: dir))
+            .flatMap { ISO8601DateFormatter().date(from: $0.referenceDateISO) } ?? Date()
         var expectedCache: [String: ExpectedDoc] = [:]
         var scores: [CaseScore] = []
         for raw in raws {
@@ -45,7 +50,7 @@ struct ScoreCommand: AsyncParsableCommand {
                 expected = try Fixtures.loadExpected(root: fixtures, caseName: raw.fixture)
                 expectedCache[raw.fixture] = expected
             }
-            let score = ScoreCore.rescore(raw: raw, expected: expected, subjectId: subjectId, now: Date())
+            let score = ScoreCore.rescore(raw: raw, expected: expected, subjectId: subjectId, now: referenceDate)
             try ArtifactWriter.writeScored(score, key: raw.key, runDir: dir)
             scores.append(score)
         }
