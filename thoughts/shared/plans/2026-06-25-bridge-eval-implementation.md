@@ -6,6 +6,7 @@
 - **Design source of truth:** `thoughts/shared/plans/2026-06-24-bridge-eval-design.md`
 - **API surface source of truth:** `thoughts/shared/agents/scout/bridge-eval-api-surface.md`
 - **Worktree:** `.claude/worktrees/bridgekit-eval` (base `main`, 6523551)
+- **Premortem fixes folded in (2026-06-25):** date-parser unification (Task 4), missedRejected display-name linkage (Task 5), N=1 stdev (Tasks 6 & 11), manifest-first write (Task 12), per-run distinct prompt hashes (Tasks 3, 6, 10, 11, 12).
 
 ## Goal
 
@@ -35,12 +36,12 @@ Two layers, built pure-first:
 ### Run-directory layout (design §7)
 ```
 <runs-root>/<timestamp>/
-  manifest.json      # promptHash, models, params, sampleCount — NO PHI
-  raw/<key>.json     # full LLM envelope (jsonText + meta) — replay/research input
+  manifest.json      # promptHashes (distinct, per-run), models, params, sampleCount — NO PHI
+  raw/<key>.json     # full LLM envelope (jsonText + meta) + per-case promptHash — replay/research input
   scored/<key>.json  # decoded result + per-case CaseScore
   results.json       # aggregate RunResults (the fitness objective)
 ```
-Key format: `<promptHash>__<model>__<fixture>__<sample>`.
+Key format: `<promptHash>__<model>__<fixture>__<sample>`. Each fixture has its OWN page set → its OWN prompt → its OWN `promptHash`, so the per-case hash lives in the artifact key AND in each raw/scored artifact; the manifest records the DISTINCT set across the run (premortem Fix 5).
 
 ## Tech Stack
 
@@ -59,7 +60,7 @@ Key format: `<promptHash>__<model>__<fixture>__<sample>`.
 5. **Separate subcommands from day one (design §13.2).** `run` (network), `score` (pure), `report` (pure) are distinct subcommands. NO `iterate`/`research` loop in v1.
 6. **Gitignore + preflight (design §9, §13.3).** Add `.gitignore` entries for `eval/fixtures/` and `eval/runs/` UP FRONT (Task 1). The preflight guard REFUSES to read fixtures from, or write artifacts into, a git-TRACKED path — fail loud.
 7. **Public repo — synthetic fixtures only.** Never commit real PHI. Committed tests use Tier A synthetic data (Jane Public / John Sample style) ONLY. Real PDFs + `expected.json` are Tier B, gitignored, never in-tree.
-8. **Reuse, don't reimplement.** The harness calls the real `LLMResponseContract` / `ExtractionPrompt` / `PDFText` — it never re-derives parsing or contract logic. The only re-implementation allowed is minimal JSON artifact writing (because `RawResponseLog` lives in the un-importable `healthbridge` executable target — design constraint, scout §7).
+8. **Reuse, don't reimplement.** The harness calls the real `LLMResponseContract` / `ExtractionPrompt` / `PDFText` — it never re-derives parsing or contract logic. This includes DATE PARSING: the Matcher parses expected dates with the SAME `LLMResponseContract.parseDate` the production decoder uses (premortem Fix 1), so both sides land on the same UTC day. The only re-implementation allowed is minimal JSON artifact writing (because `RawResponseLog` lives in the un-importable `healthbridge` executable target — design constraint, scout §7).
 9. **Commits.** Plan shows conventional `git add <files>` + a single-line message; the executor translates to the repo's `github-agent-commit` helper. No HEREDOC, no `#` lines in messages.
 
 ---
@@ -219,7 +220,9 @@ Key format: `<promptHash>__<model>__<fixture>__<sample>`.
 - create `Sources/bridge-eval/EvalModels.swift`
 - create `Tests/BridgeEvalTests/EvalModelsTests.swift`
 
-The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO` shape (loinc/display/value/valueText/unit/effectiveDate/category) so `expected.json` compares like-to-like with the contract output (design §5). `effectiveDate` is stored as an ISO-8601 string and parsed by the Matcher to a UTC calendar day. Numeric value vs qualitative value is represented by which of `value`/`valueText` is present — mirroring `ObservationDTO`.
+The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO` shape (loinc/display/value/valueText/unit/effectiveDate/category) so `expected.json` compares like-to-like with the contract output (design §5). `effectiveDate` is stored as an ISO-8601 string and parsed by the Matcher to a UTC calendar day VIA `LLMResponseContract.parseDate` (one source of truth — premortem Fix 1). Numeric value vs qualitative value is represented by which of `value`/`valueText` is present — mirroring `ObservationDTO`.
+
+**Premortem Fix 5 — per-run distinct prompt hashes:** each fixture produces a different prompt and therefore a different `promptHash`. A single manifest-level `promptHash` would be misleading (it would only record one fixture's hash). So `Manifest` carries `promptHashes: [String]` (the DISTINCT hashes seen across the run, sorted) and `RunResults` carries `promptHashes: [String]` likewise. The authoritative per-case hash lives in the artifact key and in each `RawArtifact.promptHash`.
 
 **Interfaces**
 - Produces:
@@ -267,11 +270,11 @@ The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO`
       let outputConsistency: Double     // mean pairwise agreement across samples (0...1)
       let catastrophicRate: Double
   }
-  struct RunResults: Codable, Equatable { let promptHash: String; let stats: [FixtureModelStats] }
+  struct RunResults: Codable, Equatable { let promptHashes: [String]; let stats: [FixtureModelStats] }
 
   struct Manifest: Codable, Equatable {
       let timestamp: String
-      let promptHash: String
+      let promptHashes: [String]        // distinct prompt hashes seen across the run (Fix 5)
       let models: [String]
       let sampleCount: Int
       let fixtureNames: [String]
@@ -279,7 +282,7 @@ The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO`
 
   struct RawArtifact: Codable, Equatable {
       let key: String          // <promptHash>__<model>__<fixture>__<sample>
-      let promptHash: String
+      let promptHash: String   // per-case (authoritative) prompt hash
       let inputHash: String
       let model: String
       let fixture: String
@@ -330,7 +333,7 @@ The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO`
       }
 
       func testRunResultsRoundTrips() throws {
-          let r = RunResults(promptHash: "abc", stats: [
+          let r = RunResults(promptHashes: ["abc", "def"], stats: [
               FixtureModelStats(fixture: "f", model: "m",
                                 strictF1: AggregateF1(mean: 0.8, stdev: 0.1, n: 3),
                                 lenientF1: AggregateF1(mean: 0.9, stdev: 0.05, n: 3),
@@ -339,7 +342,7 @@ The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO`
       }
 
       func testManifestAndRawArtifactRoundTrip() throws {
-          let m = Manifest(timestamp: "2026-06-25T00:00:00Z", promptHash: "abc",
+          let m = Manifest(timestamp: "2026-06-25T00:00:00Z", promptHashes: ["abc", "xyz"],
                            models: ["m1", "m2"], sampleCount: 3, fixtureNames: ["f1"])
           XCTAssertEqual(try roundTrip(m), m)
           let raw = RawArtifact(key: "abc__m1__f1__0", promptHash: "abc", inputHash: "def",
@@ -438,7 +441,7 @@ The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO`
   }
 
   struct RunResults: Codable, Equatable {
-      let promptHash: String
+      let promptHashes: [String]   // distinct prompt hashes across the run (one per distinct fixture prompt)
       let stats: [FixtureModelStats]
   }
 
@@ -446,7 +449,7 @@ The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO`
 
   struct Manifest: Codable, Equatable {
       let timestamp: String
-      let promptHash: String
+      let promptHashes: [String]   // distinct prompt hashes seen across the run — NOT a single value (Fix 5)
       let models: [String]
       let sampleCount: Int
       let fixtureNames: [String]
@@ -454,7 +457,7 @@ The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO`
 
   struct RawArtifact: Codable, Equatable {
       let key: String
-      let promptHash: String
+      let promptHash: String       // per-case (authoritative) prompt hash; also embedded in `key`
       let inputHash: String
       let model: String
       let fixture: String
@@ -483,39 +486,41 @@ The artifact model `ExpectedObservation` mirrors the contract's `ObservationDTO`
 
 Identity = `(loinc, effectiveDate-at-UTC-day)`. Predicted `[Observation]` (the contract's valid output) is matched against `expected.observations`. Field grading on matched pairs: numeric value EXACT (design §13.1), qualitative value normalized string equality, unit exact UCUM string, date exact at UTC calendar day, category exact. Outcomes: `.hit` (matched + all fields correct), `.partial` (matched identity, some field wrong), `.hallucinated` (predicted, no expected match), `.missedAbsent` (expected, no predicted match). `.missedRejected` is NOT decided here — it requires the skip list and is assigned by the Scorer (Task 5); the Matcher only sees valid predictions and expected gold.
 
+**Date parsing — ONE source of truth (premortem Fix 1 / Tiger 7):** the Matcher parses `expected.effectiveDate` with the PUBLIC `LLMResponseContract.parseDate(_ s: String) -> Date?` (verified at `LLMResponseContract.swift:257` — strict zero-padded `yyyy-MM-dd`, UTC-anchored, optional time component), the SAME parser the production decoder uses to build `Observation.effectiveDate`. The Matcher does NOT use `ISO8601DateFormatter` — that diverges on offset timestamps and could land an expected date on a different UTC day than the decoded observation, producing a FALSE identity miss. Both sides therefore reduce to the SAME UTC day. An unparseable expected date drops that gold entry from the index (it can only ever miss).
+
 **Interfaces**
 - Consumes:
   - `BridgeKit.Observation` (`code: CodeableRef?`, `value: ObservationValue`, `unit: String?`, `effectiveDate: Date`, `category: ObservationCategory`)
+  - `HealthBridgeParsing.LLMResponseContract.parseDate(_ s: String) -> Date?` (the production date parser — one source of truth)
   - `ExpectedObservation`
 - Produces:
   ```swift
   enum Matcher {
       static func utcDay(_ date: Date) -> Int                          // days since epoch in UTC
-      static func parseExpectedDate(_ iso: String) -> Date?            // ISO-8601 date or timestamp
       static func match(predicted: [Observation], expected: [ExpectedObservation]) -> [MatchRecord]
   }
   ```
 
 **Steps**
 
-- [ ] Write the failing tests (error/edge first: hallucination + miss, then hit, then partial). Write `Tests/BridgeEvalTests/MatcherTests.swift`:
+- [ ] Write the failing tests (error/edge first: hallucination + miss, then hit, then partial). Note the test `date(_:)` helper also uses `LLMResponseContract.parseDate` so the test and SUT agree on day boundaries. Write `Tests/BridgeEvalTests/MatcherTests.swift`:
   ```swift
   import XCTest
   import BridgeKit
+  import HealthBridgeParsing
   @testable import bridge_eval
 
   final class MatcherTests: XCTestCase {
-      private func date(_ iso: String) -> Date {
-          let f = ISO8601DateFormatter()
-          f.formatOptions = [.withFullDate]
-          return f.date(from: iso)!
+      // Same parser the matcher and production decoder use — one source of truth.
+      private func date(_ s: String) -> Date {
+          LLMResponseContract.parseDate(s)!
       }
 
       private func observation(loinc: String, value: ObservationValue, unit: String?,
-                               date iso: String, category: ObservationCategory) -> Observation {
-          Observation(id: "id-\(loinc)-\(iso)",
+                               date s: String, category: ObservationCategory) -> Observation {
+          Observation(id: "id-\(loinc)-\(s)",
                       code: CodeableRef(system: "http://loinc.org", code: loinc, display: loinc),
-                      name: loinc, value: value, unit: unit, effectiveDate: date(iso),
+                      name: loinc, value: value, unit: unit, effectiveDate: date(s),
                       category: category, mapping: nil, confidence: 1.0, sourceLocator: nil)
       }
 
@@ -525,8 +530,14 @@ Identity = `(loinc, effectiveDate-at-UTC-day)`. Predicted `[Observation]` (the c
                               unit: unit, effectiveDate: date, category: category)
       }
 
-      func testParseExpectedDateRejectsGarbage() {
-          XCTAssertNil(Matcher.parseExpectedDate("not-a-date"))
+      func testUnparseableExpectedDateNeverMatches() {
+          // A garbage expected date drops out of the index -> the prediction can only hallucinate.
+          let preds = [observation(loinc: "8867-4", value: .quantity(72), unit: "/min",
+                                   date: "2024-01-15", category: .vital)]
+          let exp = [expected(loinc: "8867-4", value: 72, valueText: nil, unit: "/min",
+                              date: "not-a-date", category: "vital")]
+          let records = Matcher.match(predicted: preds, expected: exp)
+          XCTAssertEqual(records.map { $0.outcome }, [.hallucinated])
       }
 
       func testUnmatchedPredictedIsHallucinated() {
@@ -553,6 +564,17 @@ Identity = `(loinc, effectiveDate-at-UTC-day)`. Predicted `[Observation]` (the c
           XCTAssertEqual(records.count, 1)
           XCTAssertEqual(records.first?.outcome, .hit)
           XCTAssertNil(records.first?.fieldErrors)
+      }
+
+      func testOffsetTimestampLandsOnSameUTCDayAsDateOnly() {
+          // A fixture timestamp with an offset must reduce to the SAME UTC day as the decoded
+          // observation's date-only value — the whole point of unifying on parseDate (Fix 1).
+          let preds = [observation(loinc: "8867-4", value: .quantity(72), unit: "/min",
+                                   date: "2024-01-15", category: .vital)]
+          let exp = [expected(loinc: "8867-4", value: 72, valueText: nil, unit: "/min",
+                              date: "2024-01-15T08:00:00+00:00", category: "vital")]
+          let records = Matcher.match(predicted: preds, expected: exp)
+          XCTAssertEqual(records.first?.outcome, .hit)
       }
 
       func testRoundingSlipIsPartialNotHit() {
@@ -602,25 +624,21 @@ Identity = `(loinc, effectiveDate-at-UTC-day)`. Predicted `[Observation]` (the c
   ```swift
   import Foundation
   import BridgeKit
+  import HealthBridgeParsing
 
   /// PURE matcher (design §6). Identity = (loinc, effectiveDate at UTC calendar day). Matched pairs are
   /// graded field-by-field with EXACT numeric equality (design §13.1). Platform-free — no PDFKit — so it
   /// unit-tests everywhere. `.missedRejected` is assigned by the Scorer (it needs the skip list); the
   /// Matcher only distinguishes hit/partial/hallucinated/missedAbsent over VALID predictions vs gold.
+  ///
+  /// DATE PARSING is delegated to `LLMResponseContract.parseDate` — the SAME parser the production decoder
+  /// uses for `Observation.effectiveDate` — so an offset timestamp in a fixture and a date-only decoded
+  /// observation reduce to the SAME UTC day (premortem Fix 1). No ISO8601DateFormatter here.
   enum Matcher {
       private static let secondsPerDay = 86_400.0
 
       static func utcDay(_ date: Date) -> Int {
           Int((date.timeIntervalSince1970 / secondsPerDay).rounded(.down))
-      }
-
-      static func parseExpectedDate(_ iso: String) -> Date? {
-          let full = ISO8601DateFormatter()
-          full.formatOptions = [.withInternetDateTime]
-          if let d = full.date(from: iso) { return d }
-          let dateOnly = ISO8601DateFormatter()
-          dateOnly.formatOptions = [.withFullDate]
-          return dateOnly.date(from: iso)
       }
 
       private struct Key: Hashable { let loinc: String; let day: Int }
@@ -641,11 +659,12 @@ Identity = `(loinc, effectiveDate-at-UTC-day)`. Predicted `[Observation]` (the c
       }
 
       static func match(predicted: [Observation], expected: [ExpectedObservation]) -> [MatchRecord] {
-          // Index expected by identity; allow at most one match per expected entry.
+          // Index expected by identity; allow at most one match per expected entry. An expected date that
+          // the production parser rejects drops out of the index (it can only ever be a miss).
           var expectedByKey: [Key: ExpectedObservation] = [:]
           var unmatchedExpected = Set<Key>()
           for e in expected {
-              guard let d = parseExpectedDate(e.effectiveDate) else { continue }
+              guard let d = LLMResponseContract.parseDate(e.effectiveDate) else { continue }
               let k = Key(loinc: e.loinc, day: utcDay(d))
               expectedByKey[k] = e
               unmatchedExpected.insert(k)
@@ -680,11 +699,11 @@ Identity = `(loinc, effectiveDate-at-UTC-day)`. Predicted `[Observation]` (the c
       }
   }
   ```
-- [ ] Run it and expect PASS: `swift test --filter BridgeEvalTests.MatcherTests`. Expected: 8 tests pass.
+- [ ] Run it and expect PASS: `swift test --filter BridgeEvalTests.MatcherTests`. Expected: 9 tests pass.
 - [ ] Commit:
   ```bash
   git add Sources/bridge-eval/Matcher.swift Tests/BridgeEvalTests/MatcherTests.swift
-  git commit -m "feat(eval): add pure matcher with identity matching and exact field grading"
+  git commit -m "feat(eval): add pure matcher unifying date parsing on the production parser"
   ```
 
 ---
@@ -695,7 +714,9 @@ Identity = `(loinc, effectiveDate-at-UTC-day)`. Predicted `[Observation]` (the c
 - create `Sources/bridge-eval/Scorer.swift`
 - create `Tests/BridgeEvalTests/ScorerTests.swift`
 
-Combines Matcher output with the skip list to: (a) reclassify a `.missedAbsent` as `.missedRejected` when a `Skip` references the same loinc (links the miss to the contract rejection, design §6); (b) build the skip histogram keyed by `detail ?? .fromReason(reason)`; (c) compute strict F1 (hits only) and lenient F1 (partials = 0.5); (d) compute patient correctness. Catastrophic case: `decode` threw -> caller passes a sentinel; Scorer produces an all-zero `CaseScore` with `catastrophic: true`.
+Combines Matcher output with the skip list to: (a) reclassify a `.missedAbsent` as `.missedRejected` when a `Skip` references the same expected observation (links the miss to the contract rejection, design §6); (b) build the skip histogram keyed by `detail ?? .fromReason(reason)`; (c) compute strict F1 (hits only) and lenient F1 (partials = 0.5); (d) compute patient correctness. Catastrophic case: `decode` threw -> caller passes a sentinel; Scorer produces an all-zero `CaseScore` with `catastrophic: true`.
+
+**Premortem Fix 2 — display-name linkage:** production sets `label = dto.display ?? dto.loinc ?? "Unknown"` (verified at `LLMResponseContract.swift:116`). When the model emits a display name, the LOINC is NOT in the skip label. So the linkage matches a skip to an expected observation when `skip.label` contains EITHER the expected loinc OR the expected `display`/`name` string. This is a best-effort DIAGNOSTIC linkage only (it splits missed-rejected from missed-absent for the research stage) — it does NOT affect F1, which counts both as recall misses identically. No change to the `Skip` API for v1.
 
 **Interfaces**
 - Consumes: `HealthBridgeParsing.ParseResult` (`observations: [Observation]`, `skipped: [Skip]`), `HealthBridgeParsing.Skip` (`reason: Skip.Reason`, `label: String`, `detail: Skip.Detail?`), `ExpectedDoc`, `(name: String, dob: String)?` extracted patient, `Int` distinct count.
@@ -713,7 +734,7 @@ Combines Matcher output with the skip list to: (a) reclassify a `.missedAbsent` 
 
 **Steps**
 
-- [ ] Write the failing tests (catastrophic + skip-key first, then F1, then missed-rejected linkage, then patient). Write `Tests/BridgeEvalTests/ScorerTests.swift`:
+- [ ] Write the failing tests (catastrophic + skip-key first, then F1, then display-name missed-rejected linkage, then patient). Write `Tests/BridgeEvalTests/ScorerTests.swift`:
   ```swift
   import XCTest
   import BridgeKit
@@ -721,17 +742,16 @@ Combines Matcher output with the skip list to: (a) reclassify a `.missedAbsent` 
   @testable import bridge_eval
 
   final class ScorerTests: XCTestCase {
-      private func date(_ iso: String) -> Date {
-          let f = ISO8601DateFormatter(); f.formatOptions = [.withFullDate]; return f.date(from: iso)!
-      }
-      private func obs(_ loinc: String, _ value: Double, _ unit: String, _ iso: String) -> Observation {
+      private func date(_ s: String) -> Date { LLMResponseContract.parseDate(s)! }
+      private func obs(_ loinc: String, _ value: Double, _ unit: String, _ s: String) -> Observation {
           Observation(id: "id-\(loinc)", code: CodeableRef(system: "http://loinc.org", code: loinc, display: loinc),
-                      name: loinc, value: .quantity(value), unit: unit, effectiveDate: date(iso),
+                      name: loinc, value: .quantity(value), unit: unit, effectiveDate: date(s),
                       category: .vital, mapping: nil, confidence: 1.0, sourceLocator: nil)
       }
-      private func exp(_ loinc: String, _ value: Double, _ unit: String, _ iso: String) -> ExpectedObservation {
-          ExpectedObservation(loinc: loinc, display: loinc, value: value, valueText: nil, unit: unit,
-                              effectiveDate: iso, category: "vital")
+      private func exp(_ loinc: String, _ value: Double, _ unit: String, _ s: String,
+                       display: String? = nil) -> ExpectedObservation {
+          ExpectedObservation(loinc: loinc, display: display ?? loinc, value: value, valueText: nil, unit: unit,
+                              effectiveDate: s, category: "vital")
       }
 
       func testCatastrophicIsAllZero() {
@@ -770,11 +790,24 @@ Combines Matcher output with the skip list to: (a) reclassify a `.missedAbsent` 
           XCTAssertEqual(s.skipHistogram["noUsableValue"], 2)
       }
 
-      func testMissedAbsentBecomesMissedRejectedWhenSkippedSameLoinc() {
-          // Gold expects 8867-4; model produced nothing valid but skipped a 8867-4 entry.
-          let skip = Skip(reason: .unrepresentableValue, label: "8867-4 Heart rate", detail: .noUsableValue)
+      func testMissedAbsentBecomesMissedRejectedViaDisplayName() {
+          // PRODUCTION shape: label is the display name only (`dto.display ?? dto.loinc ?? "Unknown"`),
+          // so the LOINC is NOT in the label. The linkage must still match on the expected display string.
+          let skip = Skip(reason: .unrepresentableValue, label: "Heart rate", detail: .noUsableValue)
           let result = ParseResult(observations: [], skipped: [skip])
-          let expected = ExpectedDoc(patients: [], observations: [exp("8867-4", 72, "/min", "2024-01-15")])
+          let expected = ExpectedDoc(patients: [], observations: [
+              exp("8867-4", 72, "/min", "2024-01-15", display: "Heart rate")])
+          let s = Scorer.score(fixture: "f", model: "m", sample: 0, result: result, expected: expected,
+                               extractedPatient: nil, distinctPatientCount: 0)
+          XCTAssertEqual(s.matches.first?.outcome, .missedRejected)
+      }
+
+      func testMissedAbsentBecomesMissedRejectedViaLoincInLabel() {
+          // Some reasons append the loinc (e.g. implausible-date labels); the loinc branch still links.
+          let skip = Skip(reason: .implausibleDate, label: "8867-4 [dateAfterNow]", detail: .dateAfterNow)
+          let result = ParseResult(observations: [], skipped: [skip])
+          let expected = ExpectedDoc(patients: [], observations: [
+              exp("8867-4", 72, "/min", "2024-01-15", display: "Heart rate")])
           let s = Scorer.score(fixture: "f", model: "m", sample: 0, result: result, expected: expected,
                                extractedPatient: nil, distinctPatientCount: 0)
           XCTAssertEqual(s.matches.first?.outcome, .missedRejected)
@@ -844,10 +877,10 @@ Combines Matcher output with the skip list to: (a) reclassify a `.missedAbsent` 
                         distinctPatientCount: Int) -> CaseScore {
           var matches = Matcher.match(predicted: result.observations, expected: expected.observations)
 
-          // A skip whose label references an expected loinc reclassifies that miss: absent -> rejected.
-          let skippedLoincs = skippedLoincSet(result.skipped, expected: expected.observations)
+          // A skip that references an expected observation reclassifies that miss: absent -> rejected.
+          let rejectedLoincs = rejectedLoincSet(result.skipped, expected: expected.observations)
           matches = matches.map { record in
-              guard record.outcome == .missedAbsent, skippedLoincs.contains(record.loinc) else { return record }
+              guard record.outcome == .missedAbsent, rejectedLoincs.contains(record.loinc) else { return record }
               return MatchRecord(loinc: record.loinc, outcome: .missedRejected, fieldErrors: nil)
           }
 
@@ -868,11 +901,20 @@ Combines Matcher output with the skip list to: (a) reclassify a `.missedAbsent` 
 
       // MARK: - Helpers
 
-      private static func skippedLoincSet(_ skipped: [Skip], expected: [ExpectedObservation]) -> Set<String> {
-          let expectedLoincs = Set(expected.map { $0.loinc })
+      /// Best-effort DIAGNOSTIC linkage; does not affect F1. Production sets a skip's `label` to
+      /// `dto.display ?? dto.loinc ?? "Unknown"` (LLMResponseContract.mapEntry), so when the model emits a
+      /// display name the LOINC is NOT in the label. Match an expected observation when the skip label
+      /// contains EITHER its loinc OR its display/name string (premortem Fix 2).
+      private static func rejectedLoincSet(_ skipped: [Skip], expected: [ExpectedObservation]) -> Set<String> {
           var hit = Set<String>()
           for skip in skipped {
-              for loinc in expectedLoincs where skip.label.contains(loinc) { hit.insert(loinc) }
+              let label = skip.label
+              for e in expected {
+                  let display = e.display ?? ""
+                  if label.contains(e.loinc) || (!display.isEmpty && label.contains(display)) {
+                      hit.insert(e.loinc)
+                  }
+              }
           }
           return hit
       }
@@ -906,11 +948,11 @@ Combines Matcher output with the skip list to: (a) reclassify a `.missedAbsent` 
       }
   }
   ```
-- [ ] Run it and expect PASS: `swift test --filter BridgeEvalTests.ScorerTests`. Expected: 7 tests pass.
+- [ ] Run it and expect PASS: `swift test --filter BridgeEvalTests.ScorerTests`. Expected: 8 tests pass.
 - [ ] Commit:
   ```bash
   git add Sources/bridge-eval/Scorer.swift Tests/BridgeEvalTests/ScorerTests.swift
-  git commit -m "feat(eval): add pure scorer with strict and lenient F1 and skip histogram"
+  git commit -m "feat(eval): add pure scorer with display-name missed-rejected linkage and F1"
   ```
 
 ---
@@ -921,20 +963,22 @@ Combines Matcher output with the skip list to: (a) reclassify a `.missedAbsent` 
 - create `Sources/bridge-eval/Aggregator.swift`
 - create `Tests/BridgeEvalTests/AggregatorTests.swift`
 
-Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict and lenient F1 across the N samples, the catastrophic rate, and an output-consistency score (mean pairwise agreement of the per-sample hit loinc-sets, design §7). Population stdev. Stable ordering by `(fixture, model)`.
+Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict and lenient F1 across the N samples, the catastrophic rate, and an output-consistency score (mean pairwise agreement of the per-sample hit loinc-sets, design §7). Population stdev. Stable ordering by `(fixture, model)`. Takes `promptHashes: [String]` (distinct, per-run — premortem Fix 5) and threads them onto `RunResults`.
+
+**Premortem Fix 3 — N=1 stdev:** with population stdev, a single sample yields `stdev = 0.0, n = 1`. The added test documents this is intentional (not a divide-by-zero bug) and guards against a future divide-by-`(n-1)` regression. The `n` field carries the sample count so a consumer (Report) can distinguish "no variance" from "single sample".
 
 **Interfaces**
-- Consumes: `[CaseScore]`, `promptHash: String`
+- Consumes: `[CaseScore]`, `promptHashes: [String]`
 - Produces:
   ```swift
   enum Aggregator {
-      static func aggregate(_ scores: [CaseScore], promptHash: String) -> RunResults
+      static func aggregate(_ scores: [CaseScore], promptHashes: [String]) -> RunResults
   }
   ```
 
 **Steps**
 
-- [ ] Write the failing tests (empty/single first, then mean+stdev, then consistency). Write `Tests/BridgeEvalTests/AggregatorTests.swift`:
+- [ ] Write the failing tests (empty/single first, then mean+stdev, then N=1, then consistency). Write `Tests/BridgeEvalTests/AggregatorTests.swift`:
   ```swift
   import XCTest
   @testable import bridge_eval
@@ -951,8 +995,8 @@ Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict 
       }
 
       func testEmptyProducesNoStats() {
-          let r = Aggregator.aggregate([], promptHash: "abc")
-          XCTAssertEqual(r.promptHash, "abc")
+          let r = Aggregator.aggregate([], promptHashes: ["abc"])
+          XCTAssertEqual(r.promptHashes, ["abc"])
           XCTAssertTrue(r.stats.isEmpty)
       }
 
@@ -962,7 +1006,7 @@ Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict 
               score(fixture: "f", model: "m", sample: 1, f1: 0.8),
               score(fixture: "f", model: "m", sample: 2, f1: 1.0),
           ]
-          let r = Aggregator.aggregate(scores, promptHash: "abc")
+          let r = Aggregator.aggregate(scores, promptHashes: ["abc"])
           XCTAssertEqual(r.stats.count, 1)
           let s = r.stats[0]
           XCTAssertEqual(s.strictF1.n, 3)
@@ -971,12 +1015,22 @@ Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict 
           XCTAssertEqual(s.strictF1.stdev, 0.16329931618, accuracy: 1e-6)
       }
 
+      func testSingleSampleStdevIsZeroWithNOne() {
+          // Default --samples 1: population stdev is 0.0 with n=1 (intentional; not a divide bug). Report
+          // surfaces n=1 as "single sample" rather than "no variance" (Fix 3).
+          let r = Aggregator.aggregate([score(fixture: "f", model: "m", sample: 0, f1: 0.7)],
+                                       promptHashes: ["abc"])
+          XCTAssertEqual(r.stats[0].strictF1.n, 1)
+          XCTAssertEqual(r.stats[0].strictF1.stdev, 0.0)
+          XCTAssertEqual(r.stats[0].strictF1.mean, 0.7, accuracy: 1e-9)
+      }
+
       func testCatastrophicRate() {
           let scores = [
               score(fixture: "f", model: "m", sample: 0, f1: 0, catastrophic: true),
               score(fixture: "f", model: "m", sample: 1, f1: 1.0),
           ]
-          let r = Aggregator.aggregate(scores, promptHash: "abc")
+          let r = Aggregator.aggregate(scores, promptHashes: ["abc"])
           XCTAssertEqual(r.stats[0].catastrophicRate, 0.5, accuracy: 1e-9)
       }
 
@@ -985,7 +1039,7 @@ Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict 
               score(fixture: "f", model: "m", sample: 0, f1: 1, hitLoincs: ["8867-4", "718-7"]),
               score(fixture: "f", model: "m", sample: 1, f1: 1, hitLoincs: ["718-7", "8867-4"]),
           ]
-          let r = Aggregator.aggregate(scores, promptHash: "abc")
+          let r = Aggregator.aggregate(scores, promptHashes: ["abc"])
           XCTAssertEqual(r.stats[0].outputConsistency, 1.0, accuracy: 1e-9)
       }
 
@@ -994,7 +1048,7 @@ Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict 
               score(fixture: "f1", model: "m1", sample: 0, f1: 1),
               score(fixture: "f1", model: "m2", sample: 0, f1: 0.5),
           ]
-          let r = Aggregator.aggregate(scores, promptHash: "abc")
+          let r = Aggregator.aggregate(scores, promptHashes: ["abc"])
           XCTAssertEqual(r.stats.count, 2)
           XCTAssertEqual(r.stats.map { $0.model }, ["m1", "m2"])
       }
@@ -1007,9 +1061,10 @@ Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict 
 
   /// PURE aggregator (design §7). Groups per-case scores by (fixture, model) and computes mean ± stdev
   /// F1 across the N samples, catastrophic rate, and output-consistency (mean pairwise Jaccard agreement
-  /// of per-sample hit loinc-sets). Population stdev. Platform-free.
+  /// of per-sample hit loinc-sets). Population stdev (so n=1 -> stdev 0.0, n carried for the Report's
+  /// "single sample" note — Fix 3). Platform-free.
   enum Aggregator {
-      static func aggregate(_ scores: [CaseScore], promptHash: String) -> RunResults {
+      static func aggregate(_ scores: [CaseScore], promptHashes: [String]) -> RunResults {
           let groups = Dictionary(grouping: scores, by: { Pair(fixture: $0.fixture, model: $0.model) })
           let stats = groups.keys.sorted().map { key -> FixtureModelStats in
               let group = groups[key]!.sorted { $0.sample < $1.sample }
@@ -1021,7 +1076,7 @@ Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict 
                                        strictF1: strict, lenientF1: lenient,
                                        outputConsistency: consistency, catastrophicRate: catRate)
           }
-          return RunResults(promptHash: promptHash, stats: stats)
+          return RunResults(promptHashes: promptHashes, stats: stats)
       }
 
       private struct Pair: Hashable, Comparable {
@@ -1060,7 +1115,7 @@ Groups `[CaseScore]` by `(fixture, model)` and computes mean ± stdev of strict 
       }
   }
   ```
-- [ ] Run it and expect PASS: `swift test --filter BridgeEvalTests.AggregatorTests`. Expected: 5 tests pass.
+- [ ] Run it and expect PASS: `swift test --filter BridgeEvalTests.AggregatorTests`. Expected: 6 tests pass.
 - [ ] Commit:
   ```bash
   git add Sources/bridge-eval/Aggregator.swift Tests/BridgeEvalTests/AggregatorTests.swift
@@ -1366,7 +1421,7 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
 
       func testWriteAndReadbackManifest() throws {
           let runDir = tempRunDir()
-          let manifest = Manifest(timestamp: "2026-06-25T00:00:00Z", promptHash: "abc",
+          let manifest = Manifest(timestamp: "2026-06-25T00:00:00Z", promptHashes: ["abc"],
                                   models: ["m"], sampleCount: 1, fixtureNames: ["vitals-basic"])
           try ArtifactWriter.writeManifest(manifest, runDir: runDir)
           let data = try Data(contentsOf: runDir.appendingPathComponent("manifest.json"))
@@ -1387,7 +1442,7 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
 
       func testWriteResults() throws {
           let runDir = tempRunDir()
-          let results = RunResults(promptHash: "abc", stats: [])
+          let results = RunResults(promptHashes: ["abc"], stats: [])
           try ArtifactWriter.writeResults(results, runDir: runDir)
           let data = try Data(contentsOf: runDir.appendingPathComponent("results.json"))
           XCTAssertEqual(try JSONDecoder().decode(RunResults.self, from: data), results)
@@ -1457,7 +1512,7 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
 - create `Sources/bridge-eval/ScoreCommand.swift`
 - create `Tests/BridgeEvalTests/ScoreCommandTests.swift`
 
-`score` re-scores already-saved raw responses OFFLINE (design §3) — pure, zero network, replayable. It reads `raw/*.json` from a run dir, re-runs the contract decode on each `jsonText`, rescores against the matching fixture's `expected.json`, and rewrites `scored/*.json` + `results.json`. The decode-rescore core is extracted as a pure function `rescoreRaw` so it unit-tests with a synthetic `RawArtifact` + `ExpectedDoc`, no disk.
+`score` re-scores already-saved raw responses OFFLINE (design §3) — pure, zero network, replayable. It reads `raw/*.json` from a run dir, re-runs the contract decode on each `jsonText`, rescores against the matching fixture's `expected.json`, and rewrites `scored/*.json` + `results.json`. The decode-rescore core is extracted as a pure function `rescore` so it unit-tests with a synthetic `RawArtifact` + `ExpectedDoc`, no disk. The run-level `promptHashes` for `results.json` are the DISTINCT per-case `RawArtifact.promptHash` values, sorted (premortem Fix 5).
 
 **Interfaces**
 - Consumes: `LLMResponseContract.decode/.distinctPatientCount/.extractedPatient`, `ArtifactReader`, `Scorer`, `Aggregator`.
@@ -1519,6 +1574,7 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
           let raws = try ArtifactReader.readRaws(runDir: runDir)
           XCTAssertEqual(raws.count, 1)
           XCTAssertEqual(raws.first?.fixture, "vitals-basic")
+          XCTAssertEqual(raws.first?.promptHash, "abc")
       }
   }
   ```
@@ -1578,6 +1634,7 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
 
   /// `score` subcommand: re-score saved raw responses offline (pure). Reads raw/*.json from a run dir,
   /// rescores each against the matching fixture's expected.json, rewrites scored/*.json + results.json.
+  /// The run-level promptHashes are the DISTINCT per-case RawArtifact.promptHash values (Fix 5).
   struct ScoreCommand: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
           commandName: "score",
@@ -1590,7 +1647,6 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
       func run() async throws {
           let dir = URL(fileURLWithPath: runDir)
           let raws = try ArtifactReader.readRaws(runDir: dir)
-          let manifest = try ArtifactReader.readManifest(runDir: dir)
           var expectedCache: [String: ExpectedDoc] = [:]
           var scores: [CaseScore] = []
           for raw in raws {
@@ -1605,7 +1661,8 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
               try ArtifactWriter.writeScored(score, key: raw.key, runDir: dir)
               scores.append(score)
           }
-          let results = Aggregator.aggregate(scores, promptHash: manifest.promptHash)
+          let promptHashes = Set(raws.map { $0.promptHash }).sorted()
+          let results = Aggregator.aggregate(scores, promptHashes: promptHashes)
           try ArtifactWriter.writeResults(results, runDir: dir)
           FileHandle.standardError.write(Data("scored \(scores.count) case(s) -> \(dir.path)/results.json\n".utf8))
       }
@@ -1626,7 +1683,9 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
 - create `Sources/bridge-eval/ReportCommand.swift`
 - create `Tests/BridgeEvalTests/ReportCommandTests.swift`
 
-`report` aggregates a run dir into a human table + machine `results.json` (design §3). The pure piece is table rendering from `RunResults`; the command re-reads `scored/*.json` (already-computed `CaseScore`s) and re-aggregates, so `report` works even on a run dir produced by an older scorer.
+`report` aggregates a run dir into a human table + machine `results.json` (design §3). The pure piece is table rendering from `RunResults`; the command re-reads `scored/*.json` (already-computed `CaseScore`s) and re-aggregates, so `report` works even on a run dir produced by an older scorer. It threads the manifest's `promptHashes` onto the results.
+
+**Premortem Fix 3 — N=1 rendering:** when a stat's sample count is 1, the table renders the stdev cell as `n=1 (single sample)` rather than a bare `±0.00`, so a reader does not mistake "single sample" for "zero variance".
 
 **Interfaces**
 - Produces:
@@ -1647,7 +1706,7 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
 
   final class ReportCommandTests: XCTestCase {
       func testRenderTableHasHeaderAndRow() {
-          let results = RunResults(promptHash: "abc123", stats: [
+          let results = RunResults(promptHashes: ["abc123"], stats: [
               FixtureModelStats(fixture: "vitals-basic", model: "claude-opus-4-8",
                                 strictF1: AggregateF1(mean: 0.8, stdev: 0.1, n: 3),
                                 lenientF1: AggregateF1(mean: 0.9, stdev: 0.05, n: 3),
@@ -1659,8 +1718,19 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
           XCTAssertTrue(table.contains("0.80"))   // strict mean, 2dp
       }
 
+      func testRenderTableSingleSampleAnnotatesN1() {
+          let results = RunResults(promptHashes: ["abc"], stats: [
+              FixtureModelStats(fixture: "f", model: "m",
+                                strictF1: AggregateF1(mean: 0.7, stdev: 0.0, n: 1),
+                                lenientF1: AggregateF1(mean: 0.7, stdev: 0.0, n: 1),
+                                outputConsistency: 1.0, catastrophicRate: 0.0)])
+          let table = Report.renderTable(results)
+          XCTAssertTrue(table.contains("n=1 (single sample)"))
+          XCTAssertFalse(table.contains("0.70±0.00"))   // must NOT render a misleading ±0.00
+      }
+
       func testRenderTableEmpty() {
-          let table = Report.renderTable(RunResults(promptHash: "x", stats: []))
+          let table = Report.renderTable(RunResults(promptHashes: ["x"], stats: []))
           XCTAssertTrue(table.contains("no results"))
       }
 
@@ -1695,20 +1765,24 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
   import Foundation
   import ArgumentParser
 
-  /// Pure human-table rendering of aggregate results (design §3 `report`).
+  /// Pure human-table rendering of aggregate results (design §3 `report`). A single-sample stat renders
+  /// `n=1 (single sample)` instead of a misleading `±0.00` (premortem Fix 3).
   enum Report {
       static func renderTable(_ results: RunResults) -> String {
           guard !results.stats.isEmpty else {
-              return "no results (prompt \(results.promptHash))\n"
+              return "no results (prompts \(results.promptHashes.joined(separator: ",")))\n"
           }
           func f(_ x: Double) -> String { String(format: "%.2f", x) }
-          var lines = ["prompt \(results.promptHash)",
+          func cell(_ a: AggregateF1) -> String {
+              a.n <= 1 ? "\(f(a.mean)) n=1 (single sample)" : "\(f(a.mean))±\(f(a.stdev))"
+          }
+          var lines = ["prompts \(results.promptHashes.joined(separator: ","))",
                        "fixture\tmodel\tstrictF1\tlenientF1\tconsistency\tcatastrophic"]
           for s in results.stats {
               lines.append([
                   s.fixture, s.model,
-                  "\(f(s.strictF1.mean))±\(f(s.strictF1.stdev))",
-                  "\(f(s.lenientF1.mean))±\(f(s.lenientF1.stdev))",
+                  cell(s.strictF1),
+                  cell(s.lenientF1),
                   f(s.outputConsistency),
                   f(s.catastrophicRate),
               ].joined(separator: "\t"))
@@ -1729,17 +1803,17 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
           let dir = URL(fileURLWithPath: runDir)
           let manifest = try ArtifactReader.readManifest(runDir: dir)
           let scores = try ArtifactReader.readScores(runDir: dir)
-          let results = Aggregator.aggregate(scores, promptHash: manifest.promptHash)
+          let results = Aggregator.aggregate(scores, promptHashes: manifest.promptHashes)
           try ArtifactWriter.writeResults(results, runDir: dir)
           print(Report.renderTable(results))
       }
   }
   ```
-- [ ] Run it and expect PASS: `swift test --filter BridgeEvalTests.ReportCommandTests`. Expected: 3 tests pass.
+- [ ] Run it and expect PASS: `swift test --filter BridgeEvalTests.ReportCommandTests`. Expected: 4 tests pass.
 - [ ] Commit:
   ```bash
   git add Sources/bridge-eval/ArtifactReader.swift Sources/bridge-eval/ReportCommand.swift Tests/BridgeEvalTests/ReportCommandTests.swift
-  git commit -m "feat(eval): add report subcommand with pure aggregate-table renderer"
+  git commit -m "feat(eval): add report subcommand with single-sample-aware table renderer"
   ```
 
 ---
@@ -1750,7 +1824,11 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
 - create `Sources/bridge-eval/RunCommand.swift`
 - create `Tests/BridgeEvalTests/RunCommandTests.swift`
 
-`run` is the ONLY network-touching path (design §3, §10) and the ONLY one that reads PDFs — so the PDF/network leg is wrapped in `#if canImport(PDFKit) && os(macOS)`. It is unit-tested with a STUB `LLMExtractor` (zero network, zero keys — design §10): a pure `RunCore.runCase` takes an injected extractor + pre-read PDF bytes + prompt, executes the production step sequence, and produces `(RawArtifact, CaseScore)`. The CLI `run()` wires preflight guard -> fixtures discovery -> per-case PDF read -> `RunCore.runCase` -> artifact writes -> aggregate. Provider/extractor selection mirrors the CLI's `Provider` enum and `AnthropicExtractor`/`OpenAIExtractor` initializers (scout §5).
+`run` is the ONLY network-touching path (design §3, §10) and the ONLY one that reads PDFs — so the PDF/network leg is wrapped in `#if canImport(PDFKit) && os(macOS)`. It is unit-tested with a STUB `LLMExtractor` (zero network, zero keys — design §10): a pure `RunCore.runCase` takes an injected extractor + pre-read PDF bytes + prompt, executes the production step sequence, and produces `(RawArtifact, CaseScore)`. The CLI `run()` wires preflight guard -> fixtures discovery -> manifest write (BEFORE the loop) -> per-case PDF read -> `RunCore.runCase` -> artifact writes -> aggregate. Provider/extractor selection mirrors the CLI's `Provider` enum and `AnthropicExtractor`/`OpenAIExtractor` initializers (scout §5).
+
+**Premortem Fix 4 — manifest-first:** the manifest is written BEFORE the fixture loop begins. It needs only models, params, sampleCount, fixture list, and the distinct prompt hashes — all known up front (the prompt hashes are computed by pre-reading each fixture's pages once before the network loop). A mid-run transport error then still leaves a readable run dir that `score` can replay.
+
+**Premortem Fix 5 — distinct prompt hashes:** the manifest and results carry the DISTINCT set of per-case prompt hashes (one per fixture prompt), computed in the pre-pass.
 
 **Interfaces**
 - Consumes: `PDFText.pages` (guarded), `ExtractionPrompt.make`, `LLMRequest`, `any LLMExtractor`, `LLMResponseContract.*`, `Hashing`, `Scorer`, `ArtifactWriter`, `Preflight`, `Fixtures`.
@@ -1883,7 +1961,8 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
 
   /// `run` subcommand: fixtures × models × N samples → call models → write raw + scored + results.
   /// The PDF read and adapter calls touch disk/network, so the body is macOS-guarded (PDFKit) and never
-  /// runs in CI (design §10). The preflight guard refuses git-tracked fixture/run paths (design §9).
+  /// runs in CI (design §10). The preflight guard refuses git-tracked fixture/run paths (design §9). The
+  /// manifest is written BEFORE the network loop (Fix 4) so a mid-run failure leaves a replayable run dir.
   struct RunCommand: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
           commandName: "run",
@@ -1908,19 +1987,35 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
           let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
           let dir = ArtifactWriter.runDir(runsRoot: runsRoot, timestamp: timestamp)
 
+          // Pre-pass: read each fixture's pages ONCE, compute its prompt hash, and keep pages for the loop.
+          // This lets the manifest be written BEFORE any network call (Fix 4) and record the DISTINCT
+          // per-fixture prompt hashes (Fix 5).
+          var pagesByCase: [String: [String]] = [:]
+          var pdfDataByCase: [String: Data] = [:]
+          var promptHashSet = Set<String>()
+          for caseName in cases {
+              let pdfData = try Data(contentsOf: Fixtures.inputPDFURL(root: fixtures, caseName: caseName))
+              let pages = try PDFText.pages(pdfData)
+              pagesByCase[caseName] = pages
+              pdfDataByCase[caseName] = pdfData
+              promptHashSet.insert(Hashing.promptHash(ExtractionPrompt.make(pages: pages)))
+          }
+          let promptHashes = promptHashSet.sorted()
+
+          let manifest = Manifest(timestamp: timestamp, promptHashes: promptHashes,
+                                  models: models, sampleCount: samples, fixtureNames: cases)
+          try ArtifactWriter.writeManifest(manifest, runDir: dir)   // BEFORE the loop (Fix 4)
+
           var allScores: [CaseScore] = []
-          var promptHashSeen = ""
           for caseName in cases {
               let expected = try Fixtures.loadExpected(root: fixtures, caseName: caseName)
-              let pdfURL = Fixtures.inputPDFURL(root: fixtures, caseName: caseName)
-              let pdfData = try Data(contentsOf: pdfURL)
-              let pages = try PDFText.pages(pdfData)
+              let pages = pagesByCase[caseName] ?? []
+              let pdfData = pdfDataByCase[caseName] ?? Data()
               for model in models {
                   for sample in 0..<samples {
                       let (raw, score) = try await RunCore.runCase(
                           pdfData: pdfData, pages: pages, model: model, fixture: caseName, sample: sample,
                           extractor: extractor, expected: expected, subjectId: subjectId, now: Date())
-                      promptHashSeen = raw.promptHash
                       try ArtifactWriter.writeRaw(raw, runDir: dir)
                       try ArtifactWriter.writeScored(score, key: raw.key, runDir: dir)
                       allScores.append(score)
@@ -1928,10 +2023,7 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
               }
           }
 
-          let manifest = Manifest(timestamp: timestamp, promptHash: promptHashSeen,
-                                  models: models, sampleCount: samples, fixtureNames: cases)
-          try ArtifactWriter.writeManifest(manifest, runDir: dir)
-          let results = Aggregator.aggregate(allScores, promptHash: promptHashSeen)
+          let results = Aggregator.aggregate(allScores, promptHashes: promptHashes)
           try ArtifactWriter.writeResults(results, runDir: dir)
           FileHandle.standardError.write(Data("run complete -> \(dir.path)\n".utf8))
           #else
@@ -1958,7 +2050,7 @@ A case dir is `<root>/<case-name>/` containing `expected.json` (always) and `inp
 - [ ] Commit:
   ```bash
   git add Sources/bridge-eval/RunCommand.swift Tests/BridgeEvalTests/RunCommandTests.swift
-  git commit -m "feat(eval): add macOS-guarded run subcommand with stub-tested run core"
+  git commit -m "feat(eval): add macOS-guarded run subcommand with manifest-first write"
   ```
 
 ---
@@ -2042,28 +2134,41 @@ Replace the Task 1 stub's role: `BridgeEval` becomes the `@main AsyncParsableCom
 | §3 | Dev-only target, not in `products` | 1, 13 |
 | §4 | Capture input hash, prompt hash, raw envelope + tokens + stop_reason, decode outcome, observations, skips, patient, timing | 2 (hashes), 3 (`RawArtifact` fields), 12 (`RunCore` populates all) |
 | §5 | Two-tier fixtures; `expected.json` = contract shape; `--fixtures` override; Tier A committed synthetic | 3 (`ExpectedDoc` shape), 8 (loader + synthetic gold), 10/12 (`--fixtures`) |
-| §6 | Contract conformance (catastrophic + skip histogram) + extraction quality (hit/partial/missed-rejected/missed-absent/hallucinated), field grading, strict/lenient F1, exact numeric grading | 4 (matcher), 5 (scorer, missed-rejected linkage, histogram, F1) |
-| §7 | N samples, mean±stdev F1, output-consistency, run-dir layout (manifest/raw/scored/results), key format | 6 (aggregator), 9 (writer + key + layout), 12 (sampling loop) |
+| §6 | Contract conformance (catastrophic + skip histogram) + extraction quality (hit/partial/missed-rejected/missed-absent/hallucinated), field grading, strict/lenient F1, exact numeric grading | 4 (matcher), 5 (scorer, display-name missed-rejected linkage, histogram, F1) |
+| §7 | N samples, mean±stdev F1, output-consistency, run-dir layout (manifest/raw/scored/results), key format | 6 (aggregator + N=1 stdev), 9 (writer + key + layout), 12 (sampling loop + manifest-first) |
 | §8 | Structured `Skip.Detail` histogram keying | 5 (`skipDetailKey`) — consumes the already-merged `Skip.Detail` |
 | §9, §13.3 | gitignore up front, preflight git-tracked refusal, manifest no-PHI, synthetic-only tests | 1 (gitignore), 7 (preflight), 3/9 (manifest = hashes/params only), all tests Tier A |
 | §10 | Pure matcher/scorer unit-tested; `run` only network path, key-gated; preflight unit-tested | 4–6 (pure tests), 7 (preflight tests), 12 (stub-tested `RunCore`) |
 | §11 | Growth path: results.json fitness, raw/ as research input; no loop in v1 | covered structurally (artifacts), explicitly excluded |
 | §12 | YAGNI: no iterate/research, no calibration, no third provider, no CLI change | excluded; CryptoKit/JSON re-impl keeps `healthbridge` untouched (Task 9 note) |
 
-**No spec gaps for §1–§12.** Two deliberate, design-sanctioned simplifications (flagged for your call below): (a) numeric value EXACT only — tolerance knob deferred per §13.1; (b) confidence-calibration data is captured in `Observation.confidence` via the decoded result but no calibration analysis is built, per §12.
+**No spec gaps for §1–§12.** Two deliberate, design-sanctioned simplifications (flagged for the user's call): (a) numeric value EXACT only — tolerance knob deferred per §13.1; (b) confidence-calibration data is captured in `Observation.confidence` via the decoded result but no calibration analysis is built, per §12.
+
+### Premortem-fix coverage (the five folded-in items)
+
+| Fix | Item | Where applied |
+|---|---|---|
+| 1 | Date-parser unification on `LLMResponseContract.parseDate` | Task 4 (interface, narrative, impl, tests incl. offset-timestamp + unparseable); Tasks 3/5 narrative + test helpers use `parseDate` |
+| 2 | `missedRejected` display-name linkage (label = display, not loinc) | Task 5 (`rejectedLoincSet` matches loinc OR display; `// best-effort diagnostic … does not affect F1` comment; production-shape display-only test + loinc-in-label test) |
+| 3 | N=1 stdev | Task 6 (`testSingleSampleStdevIsZeroWithNOne`); Task 11 (`n=1 (single sample)` cell + `testRenderTableSingleSampleAnnotatesN1`) |
+| 4 | Manifest-first write | Task 12 (pre-pass reads pages once, writes manifest BEFORE the network loop) |
+| 5 | Per-run distinct prompt hashes | Task 3 (`Manifest.promptHashes: [String]`, `RunResults.promptHashes: [String]`, per-case `RawArtifact.promptHash`); Task 6 (`aggregate(_:promptHashes:)`); Task 10 (distinct from raws); Task 11 (from manifest); Task 12 (pre-pass distinct set) |
 
 ### Placeholder scan
-No placeholders. Every Swift code block is complete and compilable: every type referenced (`Observation`, `ObservationValue`, `CodeableRef`, `ParseResult`, `Skip`, `Skip.Detail`, `LLMRequest`, `LLMRawResponse`, `LLMResponseMeta`, `LLMError`, `AnthropicExtractor`, `OpenAIExtractor`) is defined either in the scout map (consumed) or in an earlier task (produced). No "similar to Task N", no "add error handling" — error paths are written out (catastrophic, transport-error propagation, missing-key, guard refusal).
+No placeholders. Every Swift code block is complete and compilable: every type referenced (`Observation`, `ObservationValue`, `CodeableRef`, `ParseResult`, `Skip`, `Skip.Detail`, `LLMRequest`, `LLMRawResponse`, `LLMResponseMeta`, `LLMError`, `LLMResponseContract.parseDate`, `AnthropicExtractor`, `OpenAIExtractor`) is defined either in the scout map / verified source (consumed) or in an earlier task (produced). No "similar to Task N", no "add error handling" — error paths are written out (catastrophic, transport-error propagation, missing-key, guard refusal, unparseable expected date).
 
 ### Type-consistency check
 - `ExtractionPrompt.make(pages: [String]) -> String` — used verbatim in Task 12; promptHash computed via `Hashing.promptHash` (Task 2), NOT from `make` (mismatch #1 baked in). ✓
+- `LLMResponseContract.parseDate(_ s: String) -> Date?` — VERIFIED public at `LLMResponseContract.swift:257`; used by Matcher (Task 4) and the Task 4/5 test helpers as the single date-parsing source of truth (Fix 1). ✓
+- `LLMResponseContract.mapEntry` sets `label = dto.display ?? dto.loinc ?? "Unknown"` — VERIFIED at `LLMResponseContract.swift:116`; drives the Task 5 display-name linkage (Fix 2). ✓
 - `PDFText.pages(_ data: Data) throws -> [String]` — macOS-guarded; called only in `RunCommand.run()` body inside `#if canImport(PDFKit) && os(macOS)` (mismatch #4 baked in). ✓
 - `extractor.extract(_:) async throws -> LLMRawResponse` + `LLMResponseMeta(inputTokens:outputTokens:stopReason:)` — Task 12 reads `response.meta?.inputTokens/.outputTokens/.stopReason`. ✓
 - `LLMResponseContract.decode(_:subjectId:subjectDOB:now:) throws -> ParseResult`, `.distinctPatientCount(_:) throws -> Int`, `.extractedPatient(_:) throws -> (name:String,dob:String)?` — used in Tasks 10 and 12 with exactly these signatures (verified by reading the source). ✓
 - `Skip(reason:label:detail:)`, `Skip.Reason`, `Skip.Detail` cases (`bothValueAndText/noUsableValue/nonFiniteValue/confidenceOutOfRange(got:)/dateMalformed/dateBeforeDOB/dateAfterNow/missingCode`) — `skipDetailKey` (Task 5) handles every case. ✓
 - `Observation` fields (`code: CodeableRef?`, `value: ObservationValue`, `unit: String?`, `effectiveDate: Date`, `category: ObservationCategory`, `confidence: Double`) — matcher/scorer use exactly these. ✓
+- `Manifest.promptHashes: [String]` / `RunResults.promptHashes: [String]` (Fix 5) — produced in Task 3, consumed consistently by `Aggregator.aggregate(_:promptHashes:)` (Task 6), `ScoreCommand` (distinct from raws, Task 10), `ReportCommand` (from manifest, Task 11), `RunCommand` (pre-pass distinct set, Task 12). No stale `promptHash:` singular references remain. ✓
 - `RawResponseLog` NOT imported anywhere — Task 9 re-implements writing (mismatch #3 baked in). ✓
 - Cross-task type continuity: `CaseScore`/`RunResults`/`Manifest`/`RawArtifact` produced in Task 3 are consumed unchanged by Tasks 5, 6, 9, 10, 11, 12. ✓
 - ArgumentParser style mirrors `HealthBridge` exactly: `@main`, `CommandConfiguration(commandName:abstract:subcommands:)`, `@Option(name: .long)`, `AsyncParsableCommand`. ✓
 
-All consistent — no fixes required.
+All consistent — no fixes required. (`ScoreCommand` no longer reads the manifest, so its earlier `readManifest` call was removed; results' `promptHashes` now derive from the raw artifacts, which is more accurate than trusting a possibly-partial manifest.)
