@@ -1,0 +1,72 @@
+root_span_id: eae8fd12-b939-4f7a-8cf7-0df2b27af402
+turn_span_id: 6ee48de6-0201-4198-b6ba-f79cb1fd85d7
+session_id: eae8fd12-b939-4f7a-8cf7-0df2b27af402
+---
+session: main
+session_uuid: eae8fd12-b939-4f7a-8cf7-0df2b27af402
+date: 2026-06-25
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Shipped bridge-eval (dev-only LLM-extraction evaluation harness, issue #4 follow-up) via PR #10 — MERGED to main (merge commit 998d712). 13-task reviewer-gated TDD build off an approved design + premortem'd plan; Gemini's 3 review findings fixed; 62/62 eval tests green. Also closed out the M3 fast-follows session (verified PR #9 merged, issues #3/#4/#5 closed) and cleaned all stale worktrees + 6 merged remote branches.
+now: Pick the next track (no work is mid-flight — bridge-eval is fully merged). Most immediate unfinished thread is that the harness has NEVER been exercised end-to-end — no Tier B fixtures exist and the `run` network/PDF leg is untested. First concrete action option A) create a gitignored Tier B fixture `eval/fixtures/<case>/{input.pdf,expected.json}` (synthetic or real PHI — local only) and run a live smoke `swift run bridge-eval run --fixtures eval/fixtures --models <model> --api-key …` then `score`/`report` to validate the untested leg. Option B) build the deferred iterate/research loop (design §11). Option C) the still-untaken iOS-writer milestone (needs its own spec/plan).
+test: origin/main is authoritative and now 998d712 (LOCAL main working tree is STILL stale at 90ac587 — never switched all session; the M3+eval code is NOT on local disk). To work on code, cut a fresh worktree from a FETCHED origin/main (a one-time `git fetch origin main` is the established, user-approved unblock). Eval suite from a fresh worktree at 998d712 — `cd <worktree> && swift test --filter BridgeEvalTests` (expect 62/62); full package `swift test` (expect ~287/287). `swift run bridge-eval --help` lists run/score/report.
+
+done_this_session:
+  - task: "Closed out the prior M3-fast-follows handoff — verified PR #9 (#4 raw-response logging) already MERGED (merge 6523551), issues #3/#4/#5 auto-closed, zero open PRs. Removed the last M3 worktree+branch (bridgekit-m3-raw-logging)."
+    files: []
+  - task: "Chose next track = the #4 eval HARNESS. Found the design ALREADY existed and was approved (thoughts/shared/plans/2026-06-24-bridge-eval-design.md); resolved its §13 open items (exact numeric grading / separate run+score / gitignored eval/fixtures) and committed the design to main (was untracked locally; created on main via agent-gh PUT, a990e40)."
+    files: ["thoughts/shared/plans/2026-06-24-bridge-eval-design.md"]
+  - task: "Scout mapped the real API surface on current main; surfaced 3 design-vs-code mismatches (no prompt hash from ExtractionPrompt → harness computes own CryptoKit SHA-256; extractDocument is private → call public steps directly; RawResponseLog lives in the un-importable healthbridge executable → harness writes its own JSON artifacts)."
+    files: ["thoughts/shared/agents/scout/bridge-eval-api-surface.md"]
+  - task: "Architect wrote a 13-task bite-sized TDD implementation plan grounded in verified signatures; committed to main (bd3074d)."
+    files: ["thoughts/shared/plans/2026-06-25-bridge-eval-implementation.md"]
+  - task: "Ran /premortem deep (plan-reviewer) BEFORE implementing — verdict safe-with-minor-fixes; the scary linchpins (hyphen→bridge_eval module, @testable import of an @main executable, bare import CryptoKit) were all proven paper-tigers via existing repo precedent. Folded 5 mitigations into the plan (parser unification, missedRejected display-OR-loinc linkage, N=1 stdev annotation, manifest-first, per-run distinct promptHashes); re-committed (d5f1e55)."
+    files: ["thoughts/shared/plans/2026-06-25-bridge-eval-implementation.md"]
+  - task: "Implemented all 13 tasks reviewer-gated: kraken per task → lead independently ran swift test → github-agent-commit each. 14 GitHub-signed commits (13 tasks + 1 entry-point build fix). Zero plan deviations. Final: 283/283 full-package tests, healthbridge build untouched, bridge-eval --help lists run/score/report."
+    files: ["Sources/bridge-eval/*.swift", "Tests/BridgeEvalTests/*"]
+  - task: "Opened PR #10; intook Gemini review (3 findings, all verified REAL and fixed in 680297a): Matcher duplicate-(loinc,UTC-day) key collapse → grouped [Key:[ExpectedObservation]]; provider env-key case-sensitivity; non-deterministic `score` → added unsanitized Manifest.referenceDateISO (Gemini's own snippet was buggy on the colon-sanitized timestamp). 62/62 green. Codex never ran (~38min)."
+    files: ["Sources/bridge-eval/Matcher.swift", "Sources/bridge-eval/RunCommand.swift", "Sources/bridge-eval/ScoreCommand.swift", "Sources/bridge-eval/EvalModels.swift"]
+  - task: "POST-MERGE: user merged PR #10 (merge 998d712). Removed the bridgekit-eval worktree+branch. Earlier removed stale worktrees bridgekit-m1 + sibling ~/Development/bridgekit-m2, and deleted 6 fully-merged REMOTE branches (bridgekit-m1/m2/m3 + 3 m3 fast-follows). Remote now has only main; local has only the main worktree/branch."
+    files: []
+
+blockers: []
+questions: []
+
+decisions:
+  - design_already_approved: "The eval harness design pre-existed and was approved; brainstorming reduced to resolving §13 open items. Implementation plan was authored fresh against scout-verified signatures (not reasoning blind)."
+  - reviewer_gated_ephemeral_tdd: "Used the repo's proven flow over a native pane team: lead dispatches each task to kraken (implements+tests, leaves unstaged, NO git), lead independently runs swift test, lead commits via github-agent-commit. Batched the low-risk pure-core tasks (6–9, 10–11) into single kraken dispatches to cut overhead while keeping per-task atomic commits."
+  - entry_point_stub_then_replace: "SwiftPM only treats a SINGLE-file executable as an implicit script; the multi-file bridge-eval failed to link (`_bridge_eval_main` undefined) from Task 2 on. Added a temporary @main BridgeEvalEntry (commit ee048e4) to unblock linking for Tasks 2–12, then Task 13 REPLACED it with the real ArgumentParser root (only one @main allowed). Plan defect: it deferred @main to Task 13 — the entry point belonged in the Task-1 scaffold."
+  - score_determinism_diverged_from_bot: "Gemini's fix for non-deterministic `score` (`ISO8601DateFormatter().date(from: manifest.timestamp)`) was itself buggy — manifest.timestamp is filesystem-sanitized (colons→dashes) for the dir name and won't parse. Diverged: added a separate unsanitized Manifest.referenceDateISO set from the same run instant; score parses that for `now`."
+
+findings:
+  - local_main_working_tree_still_stale: "The bare local checkout's working tree is STILL at 90ac587 and physically lacks ALL M3 + bridge-eval code. origin/main is authoritative (998d712 after the PR#10 merge). Always cut a fresh worktree from a fetched origin/main; never trust the bare checkout's disk state. Repo rule forbids raw git fetch — a one-time `git fetch origin main` is the established user-approved unblock."
+  - bots_partial_coverage: "On PR #10 only Gemini ran (caught 3 real bugs the plan + premortem + lead-review all missed — notably the Matcher duplicate-(loinc,day) key collapse). Codex was triggered (@codex review) but never posted in ~38min. Don't assume both bots will run; Gemini alone added real signal."
+  - harness_never_run_e2e: "bridge-eval ships fully unit-tested (62 tests, stub LLMExtractor) but the `run` network/PDF leg has NEVER executed — no Tier B fixtures exist (eval/fixtures is gitignored/empty). End-to-end validation against a live model is the obvious next smoke."
+
+worked:
+  - "Scout-map → architect-plan → premortem(plan-reviewer) → reviewer-gated kraken implementation pipeline: every signature verified against source before code was written, so all 13 tasks transcribed with ZERO deviations and the plan code compiled first-try each task."
+  - "Batching low-risk pure-core tasks (6–9 and 10–11) into single kraken dispatches, then landing per-task atomic github-agent-commits after one independent suite run — cut the round-trip overhead ~half without losing commit atomicity or the test gate."
+  - "Pre-mortem BEFORE implementation verified the 3 scariest assumptions (hyphen→module mapping, @testable import of @main executable, bare CryptoKit) were paper-tigers via existing repo precedent (healthbridgeTests, BridgeKit/ObservationID.swift) — avoided over-engineering guards that weren't needed."
+
+failed:
+  - "Plan deferred the executable's @main entry point to the final task (13). SwiftPM only auto-synthesizes an entry for a SINGLE-file executable, so the target failed to link from Task 2 onward; incremental builds masked it (a cached single-file executable kept early `swift test` runs passing) until a fresh relink surfaced `_bridge_eval_main` undefined. Lesson: put a minimal entry point in the FIRST scaffold task of any multi-file executable. (Stored to OPC: 6a6ac604.)"
+  - "Trusting `swift test --filter` tail output: the XCTest overall summary is buried above the swift-testing footer, so `tail -N | head` repeatedly cut it off. Use `swift test > file` then rg 'Executed N' for a reliable count."
+
+next:
+  - "Decide next track with the user (no work is mid-flight). Recommended first: exercise bridge-eval end-to-end — create a gitignored Tier B fixture eval/fixtures/<case>/{input.pdf,expected.json} and run a live `bridge-eval run … --api-key …` smoke, then `score`/`report`, to validate the untested network/PDF leg."
+  - "OR build the deferred iterate/research loop (design §11–12): prompt-variant → run → score → keep-winner → research-failures. results.json is already the fitness function; raw/ failure cases are the research input."
+  - "OR the still-untaken iOS-writer milestone — needs its own spec/plan per the design roadmap."
+  - "Minor M3 tidiness still open (deferred): hoist contractSchema to a neutral home; unify the two nullable-date schema forms; adopt isPlausibleObservationDate on the FHIR/C-CDA paths; extractor-integration-test hermeticity (pin `now`)."
+
+files:
+  created:
+    - "Sources/bridge-eval/{BridgeEval,Hashing,EvalModels,Matcher,Scorer,Aggregator,Preflight,Fixtures,ArtifactWriter,ArtifactReader,RunCommand,ScoreCommand,ReportCommand}.swift (PR #10, merged 998d712)"
+    - "Tests/BridgeEvalTests/* (Smoke/Hashing/EvalModels/Matcher/Scorer/Aggregator/Preflight/Fixtures/ArtifactWriter/ScoreCommand/ReportCommand/RootCommand tests + Fixtures/vitals-basic/expected.json synthetic)"
+    - "thoughts/shared/plans/2026-06-24-bridge-eval-design.md (committed to main a990e40)"
+    - "thoughts/shared/plans/2026-06-25-bridge-eval-implementation.md (bd3074d, +5 premortem fixes d5f1e55)"
+    - "thoughts/shared/agents/scout/bridge-eval-api-surface.md"
+  modified:
+    - "Package.swift (+bridge-eval executableTarget [NOT in products] + BridgeEvalTests testTarget)"
+    - ".gitignore (+eval/fixtures/ +eval/runs/)"
