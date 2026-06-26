@@ -9,8 +9,11 @@ public struct CCDAParser: DocumentParser {
     /// Reference instant for the plausible-date guard (parity with the LLM path). Injected so tests can
     /// pin it; production uses the wall clock. Threaded via the INITIALIZER rather than the
     /// `DocumentParser.parse` signature to keep the protocol and its callers (`ParserRegistry`, CLI) untouched.
-    private let now: Date
-    public init(now: Date = Date()) { self.now = now }
+    /// Held as a CLOSURE rather than a captured `Date` so a long-lived/reused parser reads a LIVE clock
+    /// (an instance built once does not freeze "now" at construction time). A pinned date injects a constant.
+    private let nowProvider: () -> Date
+    private var now: Date { nowProvider() }
+    public init(now: Date? = nil) { self.nowProvider = now.map { d in { d } } ?? { Date() } }
 
     static let loincOID = "2.16.840.1.113883.6.1"
     static let loincURI = "http://loinc.org"

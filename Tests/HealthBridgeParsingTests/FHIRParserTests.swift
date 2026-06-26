@@ -92,4 +92,17 @@ final class FHIRParserTests: XCTestCase {
                        "observation with plausible date and nil DOB must pass through")
         XCTAssertEqual(r.observations.first?.value, .quantity(73))
     }
+
+    // MARK: - Multi-patient refusal (parity with CCDAParser single-subject binding)
+    func testFHIRRefusesMultiPatientBundle() throws {   // error handler — one document = one subject
+        // A 2-Patient bundle must be refused at parse time so patient-1's DOB can never filter
+        // patient-2's observations (parity with C-CDA's enforceSinglePatient).
+        XCTAssertThrowsError(try FHIRParser().parse(try fixture("fhir-multi-patient"), subjectId: "s")) { error in
+            guard case ParseError.malformed(let msg) = error else {
+                return XCTFail("expected ParseError.malformed, got \(error)")
+            }
+            XCTAssertTrue(msg.contains("2 patients"), "message should report the patient count: \(msg)")
+            XCTAssertTrue(msg.lowercased().contains("refusing"), "message should state refusal: \(msg)")
+        }
+    }
 }

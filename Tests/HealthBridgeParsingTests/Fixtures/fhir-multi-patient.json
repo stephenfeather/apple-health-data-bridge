@@ -1,0 +1,9 @@
+{ "resourceType": "Bundle", "type": "collection", "entry": [
+  { "resource": { "resourceType": "Patient", "id": "pat1", "name": [ { "family": "Public", "given": [ "Jane" ] } ], "birthDate": "2000-01-01" } },
+  { "resource": { "resourceType": "Patient", "id": "pat2", "name": [ { "family": "Sample", "given": [ "John" ] } ], "birthDate": "1990-01-01" } },
+  { "resource": { "resourceType": "Observation", "id": "obs1", "status": "final",
+    "category": [ { "coding": [ { "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs" } ] } ],
+    "code": { "coding": [ { "system": "http://loinc.org", "code": "29463-7", "display": "Body weight" } ] },
+    "effectiveDateTime": "2010-05-05",
+    "valueQuantity": { "value": 72, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg" } } }
+]}

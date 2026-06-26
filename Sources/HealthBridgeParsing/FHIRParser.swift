@@ -6,8 +6,11 @@ public struct FHIRParser: DocumentParser {
     /// Reference instant for the plausible-date guard (parity with the LLM path). Injected so tests can
     /// pin it; production uses the wall clock. Threaded via the INITIALIZER rather than the
     /// `DocumentParser.parse` signature to keep the protocol and its callers (`ParserRegistry`, CLI) untouched.
-    private let now: Date
-    public init(now: Date = Date()) { self.now = now }
+    /// Held as a CLOSURE rather than a captured `Date` so a long-lived/reused parser reads a LIVE clock
+    /// (an instance built once does not freeze "now" at construction time). A pinned date injects a constant.
+    private let nowProvider: () -> Date
+    private var now: Date { nowProvider() }
+    public init(now: Date? = nil) { self.nowProvider = now.map { d in { d } } ?? { Date() } }
 
     public static func canParse(_ data: Data) -> Bool {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -33,8 +36,15 @@ public struct FHIRParser: DocumentParser {
         let decoder = JSONDecoder()
         if let bundle = try? decoder.decode(ModelsR4.Bundle.self, from: data) {
             let obs = bundle.entry?.compactMap { $0.resource?.get(if: ModelsR4.Observation.self) } ?? []
-            let dob = bundle.entry?.compactMap { $0.resource?.get(if: ModelsR4.Patient.self) }
-                .first?.birthDate?.value.flatMap(FHIRDate.date(from:))
+            let patients = bundle.entry?.compactMap { $0.resource?.get(if: ModelsR4.Patient.self) } ?? []
+            // Single-subject binding (PHI-safety parity with C-CDA's enforceSinglePatient): a Bridge Document
+            // binds ONE person. Refuse a multi-patient bundle so patient-1's DOB can never filter another
+            // patient's observations as .implausibleDate. The public build()/parse APIs bypass the CLI's
+            // multi-patient preflight, so the refusal must live here.
+            if patients.count > 1 {
+                throw ParseError.malformed("FHIR Bundle contains \(patients.count) patients; refusing (one document = one subject)")
+            }
+            let dob = patients.first?.birthDate?.value.flatMap(FHIRDate.date(from:))
             return (obs, dob)
         }
         do { return ([try decoder.decode(ModelsR4.Observation.self, from: data)], nil) }
