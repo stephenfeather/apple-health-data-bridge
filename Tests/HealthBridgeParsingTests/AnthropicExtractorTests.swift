@@ -30,7 +30,7 @@ final class AnthropicExtractorTests: XCTestCase {
     /// missing date as `null` instead of being forced (required, non-nullable) to fabricate one.
     /// Kept in `required` — only the type becomes nullable.
     func testContractSchemaEffectiveDateIsNullable() throws {
-        let schema = AnthropicExtractor.contractSchema
+        let schema = LLMResponseContract.contractSchema
         let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
         let observations = try XCTUnwrap(properties["observations"] as? [String: Any])
         let items = try XCTUnwrap(observations["items"] as? [String: Any])

@@ -9,9 +9,9 @@ import FoundationNetworking
 /// json_schema: { name, strict: true, schema } }`. Differs from Anthropic: `Authorization: Bearer`
 /// (not `x-api-key`), the schema is nested under `json_schema` with a `name` + `strict: true`, and the
 /// top-level key is `response_format` (not `output_config`). It reuses the SAME shape-only contract
-/// schema (`AnthropicExtractor.contractSchema` — the single source of truth for the response shape;
-/// a neutral home is a candidate for a later refactor). Proves the protocol generalizes — a third
-/// provider is just another conformance.
+/// schema (`LLMResponseContract.contractSchema` — the neutral, single source of truth for the
+/// response shape, owned by neither provider). Proves the protocol generalizes — a third provider is
+/// just another conformance.
 ///
 /// Structured outputs guarantees response SHAPE, not clinical correctness, so the shared
 /// `LLMResponseContract` decoder STILL validates every reply as untrusted (D2).
@@ -50,7 +50,7 @@ public struct OpenAIExtractor: LLMExtractor {
                 "json_schema": [
                     "name": Self.schemaName,
                     "strict": true,
-                    "schema": AnthropicExtractor.contractSchema,
+                    "schema": LLMResponseContract.contractSchema,
                 ],
             ],
         ]
