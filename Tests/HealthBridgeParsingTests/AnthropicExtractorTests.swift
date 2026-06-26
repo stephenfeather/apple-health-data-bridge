@@ -26,9 +26,10 @@ final class AnthropicExtractorTests: XCTestCase {
         XCTAssertTrue(body.contains("claude-x"), "model id comes from the request")
     }
 
-    /// Contract honesty: `effectiveDate` must be NULLABLE (anyOf string|null) so a model can signal a
-    /// missing date as `null` instead of being forced (required, non-nullable) to fabricate one.
-    /// Kept in `required` — only the type becomes nullable.
+    /// Contract honesty: `effectiveDate` must be NULLABLE (type-union string|null) so a model can signal
+    /// a missing date as `null` instead of being forced (required, non-nullable) to fabricate one.
+    /// Kept in `required` — only the type becomes nullable. Uses the same `["<t>","null"]` type-union
+    /// form as the other 5 optionals (unified — no more `anyOf` special case).
     func testContractSchemaEffectiveDateIsNullable() throws {
         let schema = LLMResponseContract.contractSchema
         let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
@@ -36,10 +37,10 @@ final class AnthropicExtractorTests: XCTestCase {
         let items = try XCTUnwrap(observations["items"] as? [String: Any])
         let obsProps = try XCTUnwrap(items["properties"] as? [String: Any])
         let effectiveDate = try XCTUnwrap(obsProps["effectiveDate"] as? [String: Any])
-        XCTAssertNil(effectiveDate["type"], "effectiveDate must NOT be a bare type (it must be a nullable anyOf)")
-        let anyOf = try XCTUnwrap(effectiveDate["anyOf"] as? [[String: Any]])
-        XCTAssertTrue(anyOf.contains { ($0["type"] as? String) == "string" }, "anyOf needs a string branch")
-        XCTAssertTrue(anyOf.contains { ($0["type"] as? String) == "null" }, "anyOf needs a null branch")
+        XCTAssertNil(effectiveDate["anyOf"], "effectiveDate must use the unified type-union form, not anyOf")
+        let typeUnion = try XCTUnwrap(effectiveDate["type"] as? [String])
+        XCTAssertTrue(typeUnion.contains("string"), "type-union needs a string member")
+        XCTAssertTrue(typeUnion.contains("null"), "type-union needs a null member")
         // It stays REQUIRED.
         let required = try XCTUnwrap(items["required"] as? [String])
         XCTAssertTrue(required.contains("effectiveDate"))

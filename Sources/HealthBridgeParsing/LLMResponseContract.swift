@@ -72,11 +72,10 @@ public enum LLMResponseContract {
                         // Nullable so a model can honestly signal a MISSING date as null (→ decoder
                         // Skip(.noDate)) instead of being forced by a required+non-nullable field to
                         // FABRICATE one (observed: gpt-4.1/gpt-5.5 invented a DOB/today's date on a
-                        // dateless PDF; claude-opus-4-8 emitted ""). Kept in `required`. Both Anthropic
-                        // and OpenAI accept this anyOf form AND the `["<t>","null"]` type-union used by
-                        // the other 5 optionals (confirmed via live smoke); the mixed style is
-                        // intentional-but-inconsistent — unifying on one nullable form is a deferred cleanup.
-                        "effectiveDate": ["anyOf": [["type": "string"], ["type": "null"]]],
+                        // dateless PDF; claude-opus-4-8 emitted ""). Kept in `required`. Uses the same
+                        // `["<t>","null"]` type-union form as the other 5 optionals — both Anthropic and
+                        // OpenAI accept it (confirmed via live smoke), so the contract is uniform.
+                        "effectiveDate": ["type": ["string", "null"]],
                         "category": ["type": "string"],
                         "confidence": ["type": "number"],
                         "page": ["type": ["integer", "null"]],
