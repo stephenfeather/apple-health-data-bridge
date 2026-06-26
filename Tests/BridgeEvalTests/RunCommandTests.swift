@@ -18,6 +18,7 @@ private struct StubExtractor: LLMExtractor {
 }
 
 final class RunCommandTests: XCTestCase {
+    private static let fixedNow = LLMResponseContract.parseDate("2026-06-24")!
     private let goodJSON = """
     {"patients":[{"name":"Jane Public","dob":"1990-05-01"}],
      "observations":[{"loinc":"8867-4","display":"Heart rate","value":72.5,"unit":"/min",
@@ -35,7 +36,7 @@ final class RunCommandTests: XCTestCase {
             pdfData: Data("%PDF-1.4".utf8), pages: ["Heart rate 72.5 /min on 2024-01-15"],
             model: "m", fixture: "vitals-basic", sample: 0,
             extractor: StubExtractor(json: goodJSON, meta: meta), expected: expectedDoc(),
-            subjectId: "subj", now: Date())
+            subjectId: "subj", now: Self.fixedNow)
         XCTAssertEqual(raw.jsonText, goodJSON)
         XCTAssertEqual(raw.inputTokens, 10)
         XCTAssertEqual(raw.stopReason, "stop")
@@ -48,7 +49,7 @@ final class RunCommandTests: XCTestCase {
         let (raw, score) = try await RunCore.runCase(
             pdfData: Data("%PDF".utf8), pages: ["x"], model: "m", fixture: "f", sample: 0,
             extractor: StubExtractor(json: "not json"), expected: expectedDoc(),
-            subjectId: "subj", now: Date())
+            subjectId: "subj", now: Self.fixedNow)
         XCTAssertEqual(raw.jsonText, "not json")   // raw preserved for replay/research
         XCTAssertTrue(score.catastrophic)
     }
@@ -58,7 +59,7 @@ final class RunCommandTests: XCTestCase {
             _ = try await RunCore.runCase(
                 pdfData: Data("%PDF".utf8), pages: ["x"], model: "m", fixture: "f", sample: 0,
                 extractor: StubExtractor(error: .transport("boom")), expected: expectedDoc(),
-                subjectId: "subj", now: Date())
+                subjectId: "subj", now: Self.fixedNow)
             XCTFail("expected throw")
         } catch let e as LLMError {
             XCTAssertEqual(e, .transport("boom"))

@@ -3,6 +3,7 @@ import HealthBridgeParsing
 @testable import bridge_eval
 
 final class ScoreCommandTests: XCTestCase {
+    private static let fixedNow = LLMResponseContract.parseDate("2026-06-24")!
     private let goodJSON = """
     {"patients":[{"name":"Jane Public","dob":"1990-05-01"}],
      "observations":[{"loinc":"8867-4","display":"Heart rate","value":72.5,"unit":"/min",
@@ -21,13 +22,13 @@ final class ScoreCommandTests: XCTestCase {
 
     func testRescoreMalformedIsCatastrophic() {
         let score = ScoreCore.rescore(raw: raw("not json"), expected: expectedDoc(),
-                                      subjectId: "subj", now: Date())
+                                      subjectId: "subj", now: Self.fixedNow)
         XCTAssertTrue(score.catastrophic)
     }
 
     func testRescoreGoodResponseHits() {
         let score = ScoreCore.rescore(raw: raw(goodJSON), expected: expectedDoc(),
-                                      subjectId: "subj", now: Date())
+                                      subjectId: "subj", now: Self.fixedNow)
         XCTAssertFalse(score.catastrophic)
         XCTAssertEqual(score.strict.f1, 1.0, accuracy: 1e-9)
         XCTAssertEqual(score.matches.first?.outcome, .hit)
