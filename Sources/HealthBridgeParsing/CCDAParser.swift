@@ -6,7 +6,14 @@ import FoundationXML
 
 #if canImport(FoundationXML) || os(macOS)
 public struct CCDAParser: DocumentParser {
-    public init() {}
+    /// Reference instant for the plausible-date guard (parity with the LLM path). Injected so tests can
+    /// pin it; production uses the wall clock. Threaded via the INITIALIZER rather than the
+    /// `DocumentParser.parse` signature to keep the protocol and its callers (`ParserRegistry`, CLI) untouched.
+    /// Held as a CLOSURE rather than a captured `Date` so a long-lived/reused parser reads a LIVE clock
+    /// (an instance built once does not freeze "now" at construction time). A pinned date injects a constant.
+    private let nowProvider: () -> Date
+    private var now: Date { nowProvider() }
+    public init(now: Date? = nil) { self.nowProvider = now.map { d in { d } } ?? { Date() } }
 
     static let loincOID = "2.16.840.1.113883.6.1"
     static let loincURI = "http://loinc.org"
@@ -17,6 +24,7 @@ public struct CCDAParser: DocumentParser {
         let doc = try CDAXML.document(data)
         guard let root = doc.rootElement() else { throw ParseError.malformed("no ClinicalDocument root") }
         try enforceSinglePatient(root)            // Task 4
+        let dob = patientDOB(root)                 // for the plausible-date guard (nil if absent)
 
         var observations: [Observation] = []
         var skipped: [Skip] = []
@@ -24,10 +32,20 @@ public struct CCDAParser: DocumentParser {
         // also visit nested subsections, and since each section's own descendant observation walk
         // already collects everything beneath it, that double-counts subsection observations and skips.
         for section in topLevelSections(root) {
-            let (obs, skips) = parseSection(section, subjectId: subjectId)
+            let (obs, skips) = parseSection(section, subjectId: subjectId, dob: dob)
             observations.append(contentsOf: obs); skipped.append(contentsOf: skips)
         }
         return ParseResult(observations: observations, skipped: skipped)
+    }
+
+    /// The single recordTarget's birthTime as a Date (UTC), for the plausible-date guard. nil when the
+    /// document carries no patient DOB — the guard handles nil dob (skips the before-birth check only).
+    private func patientDOB(_ root: XMLElement) -> Date? {
+        guard let role = (try? CDAXML.elements(root, localName: "patientRole"))?.first,
+              let patient = CDAXML.child(role, localName: "patient"),
+              let bt = CDAXML.child(patient, localName: "birthTime"),
+              let v = CDAXML.attr(bt, "value") else { return nil }
+        return Self.date(fromHL7TS: v)
     }
 
     /// The direct structuredBody sections: ClinicalDocument/component/structuredBody/component/section.
@@ -40,22 +58,22 @@ public struct CCDAParser: DocumentParser {
     }
 
     // MARK: section dispatch (Tasks 3,5,6)
-    private func parseSection(_ section: XMLElement, subjectId: String) -> ([Observation], [Skip]) {
+    private func parseSection(_ section: XMLElement, subjectId: String, dob: Date?) -> ([Observation], [Skip]) {
         let code = CDAXML.child(section, localName: "code").flatMap { CDAXML.attr($0, "code") }
         switch code {
-        case "8716-3":  return parseVitals(section, subjectId: subjectId)          // Vital Signs
-        case "30954-2": return parseResults(section, subjectId: subjectId)         // Results
-        case "11450-4": return parseProblems(section, subjectId: subjectId)        // Problems
-        case "48765-2": return parseAllergies(section, subjectId: subjectId)       // Allergies
-        default:        return ([], [])                                            // unknown section: ignored
+        case "8716-3":  return parseVitals(section, subjectId: subjectId, dob: dob)     // Vital Signs
+        case "30954-2": return parseResults(section, subjectId: subjectId, dob: dob)    // Results
+        case "11450-4": return parseProblems(section, subjectId: subjectId, dob: dob)   // Problems
+        case "48765-2": return parseAllergies(section, subjectId: subjectId, dob: dob)  // Allergies
+        default:        return ([], [])                                                 // unknown section: ignored
         }
     }
 
     // MARK: Vital Signs (Task 3 happy path; BP organizer in Task 5)
-    private func parseVitals(_ section: XMLElement, subjectId: String) -> ([Observation], [Skip]) {
+    private func parseVitals(_ section: XMLElement, subjectId: String, dob: Date?) -> ([Observation], [Skip]) {
         var obs: [Observation] = []; var skips: [Skip] = []
         for observation in observationElements(in: section) {
-            switch quantitative(observation, category: .vital, subjectId: subjectId) {
+            switch quantitative(observation, category: .vital, subjectId: subjectId, dob: dob) {
             case .success(let o): obs.append(o); case .failure(let s): skips.append(s)
             }
         }
@@ -63,10 +81,10 @@ public struct CCDAParser: DocumentParser {
     }
 
     // MARK: results/labs (Task 6)
-    func parseResults(_ section: XMLElement, subjectId: String) -> ([Observation], [Skip]) {
+    func parseResults(_ section: XMLElement, subjectId: String, dob: Date?) -> ([Observation], [Skip]) {
         var obs: [Observation] = []; var skips: [Skip] = []
         for observation in observationElements(in: section) {
-            switch quantitative(observation, category: .lab, subjectId: subjectId) {
+            switch quantitative(observation, category: .lab, subjectId: subjectId, dob: dob) {
             case .success(let o): obs.append(o); case .failure(let s): skips.append(s)
             }
         }
@@ -74,11 +92,11 @@ public struct CCDAParser: DocumentParser {
     }
 
     // MARK: problems / allergies (Task 6) — qualitative .string values
-    func parseProblems(_ section: XMLElement, subjectId: String) -> ([Observation], [Skip]) {
-        qualitative(section, subjectId: subjectId)
+    func parseProblems(_ section: XMLElement, subjectId: String, dob: Date?) -> ([Observation], [Skip]) {
+        qualitative(section, subjectId: subjectId, dob: dob)
     }
-    func parseAllergies(_ section: XMLElement, subjectId: String) -> ([Observation], [Skip]) {
-        qualitative(section, subjectId: subjectId)
+    func parseAllergies(_ section: XMLElement, subjectId: String, dob: Date?) -> ([Observation], [Skip]) {
+        qualitative(section, subjectId: subjectId, dob: dob)
     }
 
     // MARK: helpers
@@ -101,7 +119,7 @@ public struct CCDAParser: DocumentParser {
         return false
     }
 
-    private func quantitative(_ observation: XMLElement, category: ObservationCategory, subjectId: String) -> ConvertResult {
+    private func quantitative(_ observation: XMLElement, category: ObservationCategory, subjectId: String, dob: Date?) -> ConvertResult {
         let codeEl = CDAXML.child(observation, localName: "code")
         let display = codeEl.flatMap { CDAXML.attr($0, "displayName") } ?? "Unknown"
         if isNegated(observation) { return .failure(Skip(reason: .negated, label: display)) }
@@ -112,6 +130,11 @@ public struct CCDAParser: DocumentParser {
         guard let tsEl = CDAXML.child(observation, localName: "effectiveTime"),
               let ts = CDAXML.attr(tsEl, "value"), let date = Self.date(fromHL7TS: ts) else {
             return .failure(Skip(reason: .noDate, label: display))
+        }
+        // Plausible-date guard (parity with the LLM path): drop an effectiveDate strictly before DOB or
+        // strictly after `now`. Same Skip(.implausibleDate) + Detail the contract decoder records.
+        if let imp = LLMResponseContract.implausibility(date, dob: dob, now: now) {
+            return .failure(Skip(reason: .implausibleDate, label: "\(display) [\(imp.reason)]", detail: imp.detail))
         }
         guard let valueEl = CDAXML.child(observation, localName: "value"),
               CDAXML.attr(valueEl, "nullFlavor") == nil,
@@ -126,7 +149,7 @@ public struct CCDAParser: DocumentParser {
                                     category: category, mapping: nil, confidence: 1.0, sourceLocator: nil))
     }
 
-    private func qualitative(_ section: XMLElement, subjectId: String) -> ([Observation], [Skip]) {
+    private func qualitative(_ section: XMLElement, subjectId: String, dob: Date?) -> ([Observation], [Skip]) {
         var obs: [Observation] = []; var skips: [Skip] = []
         for observation in observationElements(in: section) {
             let codeEl = CDAXML.child(observation, localName: "code")
@@ -139,6 +162,11 @@ public struct CCDAParser: DocumentParser {
             guard let tsEl = CDAXML.child(observation, localName: "effectiveTime"),
                   let ts = CDAXML.attr(tsEl, "value"), let date = Self.date(fromHL7TS: ts) else {
                 skips.append(Skip(reason: .noDate, label: display)); continue
+            }
+            // Plausible-date guard (parity with the LLM path): drop before-DOB / after-now dates.
+            if let imp = LLMResponseContract.implausibility(date, dob: dob, now: now) {
+                skips.append(Skip(reason: .implausibleDate, label: "\(display) [\(imp.reason)]", detail: imp.detail))
+                continue
             }
             let valueEl = CDAXML.child(observation, localName: "value")
             let text = valueText(valueEl) ?? display

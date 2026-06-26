@@ -32,6 +32,60 @@ public enum LLMResponseContract {
 
     private static let loincSystem = "http://loinc.org"
 
+    /// JSON Schema for the response envelope — the single source of truth for the response SHAPE,
+    /// shared by every `LLMExtractor` adapter (Anthropic structured outputs, OpenAI json_schema). It
+    /// lives here, on the decoder that validates the JSON it describes, rather than on either provider
+    /// struct (neither owns the contract). Within structured-output limits: `additionalProperties:
+    /// false` and every object key in `required` (optional fields are nullable types instead). No
+    /// `minLength`/`maximum`/`minimum`/`multipleOf` (range validation stays in the decoder), no
+    /// recursion. Shape only — the decoder enforces confidence 0...1, date validity, code/value rules.
+    static let contractSchema: [String: Any] = [
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["patients", "observations"],
+        "properties": [
+            "patients": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "dob"],
+                    "properties": [
+                        "name": ["type": "string"],
+                        "dob": ["type": "string"],
+                    ],
+                ],
+            ],
+            "observations": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["loinc", "display", "value", "valueText", "unit",
+                                 "effectiveDate", "category", "confidence", "page", "snippet"],
+                    "properties": [
+                        "loinc": ["type": "string"],
+                        "display": ["type": "string"],
+                        "value": ["type": ["number", "null"]],
+                        "valueText": ["type": ["string", "null"]],
+                        "unit": ["type": ["string", "null"]],
+                        // Nullable so a model can honestly signal a MISSING date as null (→ decoder
+                        // Skip(.noDate)) instead of being forced by a required+non-nullable field to
+                        // FABRICATE one (observed: gpt-4.1/gpt-5.5 invented a DOB/today's date on a
+                        // dateless PDF; claude-opus-4-8 emitted ""). Kept in `required`. Uses the same
+                        // `["<t>","null"]` type-union form as the other 5 optionals — both Anthropic and
+                        // OpenAI accept it (confirmed via live smoke), so the contract is uniform.
+                        "effectiveDate": ["type": ["string", "null"]],
+                        "category": ["type": "string"],
+                        "confidence": ["type": "number"],
+                        "page": ["type": ["integer", "null"]],
+                        "snippet": ["type": ["string", "null"]],
+                    ],
+                ],
+            ],
+        ],
+    ]
+
     private enum MapResult { case success(Observation); case failure(Skip) }
 
     /// Decode + validate the contract JSON into `[Observation]` + `[Skip]`.

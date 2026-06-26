@@ -6,8 +6,8 @@ public enum ParseError: Error, Equatable { case unrecognizedFormat; case malform
 public struct Skip: Equatable, Sendable {
     public enum Reason: Equatable, Sendable { case noCode, noDate, unrepresentableValue, negated, implausibleDate }
     /// Structured, machine-readable refinement of why an entry was skipped (issue #5). Additive
-    /// observability layered over `Reason` — populated by the LLM contract decoder at each rejection
-    /// site; `nil` everywhere it is not explicitly set (FHIR/C-CDA paths).
+    /// observability layered over `Reason` — populated at each rejection site (LLM, FHIR, and C-CDA
+    /// paths all set it where applicable); `nil` when not explicitly set.
     public enum Detail: Equatable, Sendable {
         case bothValueAndText
         case noUsableValue

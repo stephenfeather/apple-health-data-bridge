@@ -38,58 +38,6 @@ public struct AnthropicExtractor: LLMExtractor {
         self.apiKey = apiKey
     }
 
-    /// JSON Schema for the response envelope, within structured-output limits: `additionalProperties:
-    /// false` and every object key in `required` (optional fields are nullable types instead). No
-    /// `minLength`/`maximum`/`minimum`/`multipleOf` (range validation stays in the decoder), no
-    /// recursion. Shape only — the decoder enforces confidence 0...1, date validity, code/value rules.
-    static let contractSchema: [String: Any] = [
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["patients", "observations"],
-        "properties": [
-            "patients": [
-                "type": "array",
-                "items": [
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["name", "dob"],
-                    "properties": [
-                        "name": ["type": "string"],
-                        "dob": ["type": "string"],
-                    ],
-                ],
-            ],
-            "observations": [
-                "type": "array",
-                "items": [
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["loinc", "display", "value", "valueText", "unit",
-                                 "effectiveDate", "category", "confidence", "page", "snippet"],
-                    "properties": [
-                        "loinc": ["type": "string"],
-                        "display": ["type": "string"],
-                        "value": ["type": ["number", "null"]],
-                        "valueText": ["type": ["string", "null"]],
-                        "unit": ["type": ["string", "null"]],
-                        // Nullable so a model can honestly signal a MISSING date as null (→ decoder
-                        // Skip(.noDate)) instead of being forced by a required+non-nullable field to
-                        // FABRICATE one (observed: gpt-4.1/gpt-5.5 invented a DOB/today's date on a
-                        // dateless PDF; claude-opus-4-8 emitted ""). Kept in `required`. Both Anthropic
-                        // and OpenAI accept this anyOf form AND the `["<t>","null"]` type-union used by
-                        // the other 5 optionals (confirmed via live smoke); the mixed style is
-                        // intentional-but-inconsistent — unifying on one nullable form is a deferred cleanup.
-                        "effectiveDate": ["anyOf": [["type": "string"], ["type": "null"]]],
-                        "category": ["type": "string"],
-                        "confidence": ["type": "number"],
-                        "page": ["type": ["integer", "null"]],
-                        "snippet": ["type": ["string", "null"]],
-                    ],
-                ],
-            ],
-        ],
-    ]
-
     /// PURE: build the POST request with structured-outputs JSON-forcing. No I/O. No prefill, no tool-use.
     func makeRequest(_ r: LLMRequest) throws -> URLRequest {
         var req = URLRequest(url: Self.endpoint)
@@ -106,7 +54,7 @@ public struct AnthropicExtractor: LLMExtractor {
             "output_config": [
                 "format": [
                     "type": "json_schema",
-                    "schema": Self.contractSchema,
+                    "schema": LLMResponseContract.contractSchema,
                 ],
             ],
         ]
