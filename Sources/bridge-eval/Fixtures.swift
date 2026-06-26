@@ -72,4 +72,44 @@ enum Fixtures {
         if let pages = pagesText { return .pages(pages) }
         throw LoadError(message: "case has neither input.pdf nor pages.txt")
     }
+
+    static func pagesTextURL(root: String, caseName: String) -> URL {
+        URL(fileURLWithPath: root)
+            .appendingPathComponent(caseName)
+            .appendingPathComponent("pages.txt")
+    }
+
+    /// Thin I/O wrapper: returns `nil` when `pages.txt` is absent, else the parsed pages plus the raw
+    /// bytes (the raw bytes become the case's `inputHash` provenance for PDF-less cases).
+    static func pagesText(root: String, caseName: String) throws -> (pages: [String], raw: Data)? {
+        let url = pagesTextURL(root: root, caseName: caseName)
+        guard let raw = FileManager.default.contents(atPath: url.path) else { return nil }
+        guard let text = String(data: raw, encoding: .utf8) else {
+            throw LoadError(message: "pages.txt for '\(caseName)' is not valid UTF-8")
+        }
+        let pages = try parsePages(text)
+        return (pages, raw)
+    }
+
+    /// REAL-DIRECTORY SEAM (premortem addendum). Does an existence-ONLY check on `input.pdf` — it NEVER
+    /// reads or parses the PDF and NEVER calls `PDFText`. Fully resolves the `.pages` arm. The branch
+    /// choice routes through the CI-tested pure `resolveInput`, so BOTH arms are cross-platform testable;
+    /// `RunCommand.run()` makes the single macOS-only `PDFText.pages` call only in the `.pdf` arm.
+    enum ResolvedCaseInput: Equatable { case pdf(URL); case pages(pages: [String], raw: Data) }
+
+    static func resolveCaseInput(root: String, caseName: String) throws -> ResolvedCaseInput {
+        let pdfURL = inputPDFURL(root: root, caseName: caseName)
+        let pdfExists = FileManager.default.fileExists(atPath: pdfURL.path)   // existence-only, NEVER parsed
+        let txt = pdfExists ? nil : try pagesText(root: root, caseName: caseName)
+        switch try resolveInput(pdfExists: pdfExists, pagesText: txt?.pages) {
+        case .pdf:
+            return .pdf(pdfURL)                                                // defer the read to run()
+        case .pages(let pages):
+            // `pages` is exactly `txt`'s parsed pages; bind `raw` from the SAME non-nil txt (no force-unwrap).
+            guard let raw = txt?.raw else {
+                throw LoadError(message: "internal: pages resolved without raw bytes for '\(caseName)'")
+            }
+            return .pages(pages: pages, raw: raw)
+        }
+    }
 }

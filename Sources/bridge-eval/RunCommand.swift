@@ -79,10 +79,21 @@ struct RunCommand: AsyncParsableCommand {
         var pdfDataByCase: [String: Data] = [:]
         var promptHashSet = Set<String>()
         for caseName in cases {
-            let pdfData = try Data(contentsOf: Fixtures.inputPDFURL(root: fixtures, caseName: caseName))
-            let pages = try PDFText.pages(pdfData)
+            let pages: [String]
+            let hashBytes: Data
+            // Branch SELECTION lives in the CI-tested `Fixtures.resolveCaseInput` (existence-only PDF
+            // check, fully-resolved pages arm). Only the `.pdf` arm makes the macOS-only PDFText call.
+            switch try Fixtures.resolveCaseInput(root: fixtures, caseName: caseName) {
+            case .pdf(let pdfURL):
+                let pdfData = try Data(contentsOf: pdfURL)
+                pages = try PDFText.pages(pdfData)   // unchanged macOS/PDFKit path — the ONLY untested arm
+                hashBytes = pdfData
+            case .pages(let p, let raw):
+                pages = p                            // bound, not force-unwrapped
+                hashBytes = raw                      // raw pages.txt bytes -> meaningful inputHash
+            }
             pagesByCase[caseName] = pages
-            pdfDataByCase[caseName] = pdfData
+            pdfDataByCase[caseName] = hashBytes       // RunCore hashes this for inputHash (RunCommand.swift:16)
             promptHashSet.insert(Hashing.promptHash(ExtractionPrompt.make(pages: pages)))
         }
         let promptHashes = promptHashSet.sorted()
