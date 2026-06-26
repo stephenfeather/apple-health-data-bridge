@@ -176,17 +176,23 @@ final class CCDAParserTests: XCTestCase {
     }
     func testCCDADropsQualitativeImplausible() throws {   // error handler (qualitative path)
         let r = try parsePinned("ccda-implausible-dates")
-        // Both qualitative problems (1995 before DOB, 2099 after now) are dropped — none emitted.
-        XCTAssertFalse(r.observations.contains { if case .string = $0.value { return true } else { return false } },
-                       "both implausible-date problems must be dropped")
+        // The two Hypertension problems (1995 before DOB, 2099 after now) must be dropped.
+        XCTAssertFalse(r.observations.contains { $0.value == .string("Hypertension") },
+                       "implausible-date Hypertension problems must be dropped")
         XCTAssertEqual(r.skipped.filter {
             $0.reason == .implausibleDate && ($0.detail == .dateBeforeDOB || $0.detail == .dateAfterNow)
         }.count, 4, "2 quantitative + 2 qualitative implausible-date drops")
     }
-    func testCCDAKeepsPlausibleObservation() throws {   // happy path
+    func testCCDAKeepsPlausibleObservation() throws {   // happy path (quantitative)
         let r = try parsePinned("ccda-implausible-dates")
-        XCTAssertEqual(r.observations.count, 1)
-        XCTAssertEqual(r.observations.first?.value, .quantity(72), "only the 2010-05-05 vital is plausible")
+        XCTAssertEqual(r.observations.count, 2, "one plausible vital + one plausible qualitative")
+        XCTAssertTrue(r.observations.contains { $0.value == .quantity(72) },
+                      "2010-05-05 quantitative vital must be kept")
+    }
+    func testCCDAKeepsPlausibleQualitativeObservation() throws {   // happy path (qualitative)
+        let r = try parsePinned("ccda-implausible-dates")
+        XCTAssertTrue(r.observations.contains { $0.value == .string("Migraine") },
+                      "2025-03-19 qualitative Migraine observation must be kept (plausible date)")
     }
 }
 #endif

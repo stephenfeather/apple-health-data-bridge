@@ -55,6 +55,17 @@
             </entryRelationship>
           </act>
         </entry>
+        <entry>
+          <act classCode="ACT" moodCode="EVN">
+            <entryRelationship typeCode="SUBJ">
+              <observation classCode="OBS" moodCode="EVN">
+                <code code="55607-6" codeSystem="2.16.840.1.113883.6.1" displayName="Problem"/>
+                <effectiveTime value="20250319000000+0000"/>
+                <value xsi:type="CD" code="57676002" codeSystem="2.16.840.1.113883.6.96" displayName="Migraine"/>
+              </observation>
+            </entryRelationship>
+          </act>
+        </entry>
       </section>
     </component>
   </structuredBody></component>

@@ -85,4 +85,11 @@ final class FHIRParserTests: XCTestCase {
         XCTAssertEqual(r.observations.first?.value, .quantity(72), "only the 2010-05-05 obs is plausible")
         XCTAssertEqual(r.skipped.filter { $0.reason == .implausibleDate }.count, 2)
     }
+    func testFHIRNilDOBKeepsPlausibleObservation() throws {   // nil-DOB guard
+        // No Patient resource → dob resolves to nil. A plausible effectiveDate must NOT be over-rejected.
+        let r = try FHIRParser(now: Self.fixedNow).parse(try fixture("fhir-nil-dob"), subjectId: "s")
+        XCTAssertEqual(r.observations.count, 1,
+                       "observation with plausible date and nil DOB must pass through")
+        XCTAssertEqual(r.observations.first?.value, .quantity(73))
+    }
 }
