@@ -42,4 +42,34 @@ enum Fixtures {
             .appendingPathComponent(caseName)
             .appendingPathComponent("input.pdf")
     }
+
+    // MARK: - pages.txt input path (design §5) — pure, platform-free, zero PDFKit.
+
+    /// Form-feed (U+000C) is the canonical page delimiter — exactly what `pdftotext` emits — so a
+    /// `pages.txt` produced from a real extraction is a drop-in. Split on `\f`; drop a single trailing
+    /// empty page (the `pdftotext` trailing-FF artifact) while preserving interior empty pages; reject
+    /// an all-whitespace document for parity with `PDFText.pages` ("no extractable text",
+    /// `PDFText.swift:38-39`).
+    static func parsePages(_ text: String) throws -> [String] {
+        var pages = text.components(separatedBy: "\u{000C}")
+        if pages.count > 1, pages.last?.isEmpty == true {
+            pages.removeLast()   // drop ONLY the trailing FF artifact; interior empties stay
+        }
+        guard pages.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+            throw LoadError(message: "pages.txt has no extractable text")
+        }
+        return pages
+    }
+
+    /// Pure input-resolution decision. Keeping the branch selection here makes BOTH arms CI-testable;
+    /// only the literal `PDFText.pages` call stays macOS-guarded in `RunCommand.run()`. Precedence:
+    /// `input.pdf` wins (realistic PDFKit path, zero behavior change for existing fixtures); `pages.txt`
+    /// is the PDF-less fallback; neither present is a loud error.
+    enum ResolvedInput: Equatable { case pdf; case pages([String]) }
+
+    static func resolveInput(pdfExists: Bool, pagesText: [String]?) throws -> ResolvedInput {
+        if pdfExists { return .pdf }
+        if let pages = pagesText { return .pages(pages) }
+        throw LoadError(message: "case has neither input.pdf nor pages.txt")
+    }
 }
