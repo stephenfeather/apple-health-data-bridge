@@ -24,6 +24,17 @@ enum FHIRDate {
         return utcCalendar(dt.timeZone).date(from: c)
     }
 
+    /// Date-only FHIR `date` (e.g. `Patient.birthDate`). Partial dates (year- or year-month-only)
+    /// resolve to the first instant of the coarsest known component, in UTC.
+    static func date(from d: ModelsR4.FHIRDate) -> Date? {
+        var c = DateComponents()
+        c.year = d.year
+        c.month = d.month.map(Int.init) ?? 1
+        c.day = d.day.map(Int.init) ?? 1
+        c.hour = 0; c.minute = 0; c.second = 0
+        return utcCalendar(nil).date(from: c)
+    }
+
     static func date(from inst: Instant) -> Date? {
         // InstantDate has non-optional year/month/day (unlike DateTime's FHIRDate); time/timeZone non-optional too.
         var c = DateComponents()

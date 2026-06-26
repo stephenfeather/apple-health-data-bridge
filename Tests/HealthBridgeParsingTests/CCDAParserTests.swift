@@ -153,5 +153,40 @@ final class CCDAParserTests: XCTestCase {
         XCTAssertEqual(r.observations.count, 2)              // weight + heart rate, no dup
         XCTAssertEqual(r.skipped.count, 1)                   // the nested no-date resp rate, not double-counted
     }
+
+    // MARK: - Plausible-date guard adoption (parity with the LLM path)
+    // recordTarget DOB 2000-01-01; Vital Signs (quantitative) has weights at 1995-06-01 (before DOB),
+    // 2099-01-01 (after now), 2010-05-05 (plausible); Problem List (qualitative) has 1995 + 2099. `now` pinned.
+    private static let fixedNow = LLMResponseContract.parseDate("2026-06-24")!
+    private func parsePinned(_ n: String) throws -> ParseResult {
+        try CCDAParser(now: Self.fixedNow).parse(try fixture(n), subjectId: "s")
+    }
+
+    func testCCDADropsQuantitativeBeforeDOB() throws {   // error handler
+        let r = try parsePinned("ccda-implausible-dates")
+        XCTAssertFalse(r.observations.contains { $0.value == .quantity(70) },
+                       "1995-06-01 vital predates DOB 2000-01-01 and must be dropped")
+        XCTAssertTrue(r.skipped.contains { $0.reason == .implausibleDate && $0.detail == .dateBeforeDOB })
+    }
+    func testCCDADropsQuantitativeAfterNow() throws {   // error handler
+        let r = try parsePinned("ccda-implausible-dates")
+        XCTAssertFalse(r.observations.contains { $0.value == .quantity(71) },
+                       "2099-01-01 vital is after now and must be dropped")
+        XCTAssertTrue(r.skipped.contains { $0.reason == .implausibleDate && $0.detail == .dateAfterNow })
+    }
+    func testCCDADropsQualitativeImplausible() throws {   // error handler (qualitative path)
+        let r = try parsePinned("ccda-implausible-dates")
+        // Both qualitative problems (1995 before DOB, 2099 after now) are dropped — none emitted.
+        XCTAssertFalse(r.observations.contains { if case .string = $0.value { return true } else { return false } },
+                       "both implausible-date problems must be dropped")
+        XCTAssertEqual(r.skipped.filter {
+            $0.reason == .implausibleDate && ($0.detail == .dateBeforeDOB || $0.detail == .dateAfterNow)
+        }.count, 4, "2 quantitative + 2 qualitative implausible-date drops")
+    }
+    func testCCDAKeepsPlausibleObservation() throws {   // happy path
+        let r = try parsePinned("ccda-implausible-dates")
+        XCTAssertEqual(r.observations.count, 1)
+        XCTAssertEqual(r.observations.first?.value, .quantity(72), "only the 2010-05-05 vital is plausible")
+    }
 }
 #endif

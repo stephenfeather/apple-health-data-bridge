@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <recordTarget><patientRole><patient>
+    <name><given>Jane</given><family>Public</family></name><birthTime value="20000101"/>
+  </patient></patientRole></recordTarget>
+  <component><structuredBody>
+    <component>
+      <section>
+        <code code="8716-3" codeSystem="2.16.840.1.113883.6.1" displayName="Vital Signs"/>
+        <entry>
+          <observation classCode="OBS" moodCode="EVN">
+            <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body weight"/>
+            <effectiveTime value="19950601000000+0000"/>
+            <value xsi:type="PQ" value="70" unit="kg"/>
+          </observation>
+        </entry>
+        <entry>
+          <observation classCode="OBS" moodCode="EVN">
+            <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body weight"/>
+            <effectiveTime value="20990101000000+0000"/>
+            <value xsi:type="PQ" value="71" unit="kg"/>
+          </observation>
+        </entry>
+        <entry>
+          <observation classCode="OBS" moodCode="EVN">
+            <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body weight"/>
+            <effectiveTime value="20100505000000+0000"/>
+            <value xsi:type="PQ" value="72" unit="kg"/>
+          </observation>
+        </entry>
+      </section>
+    </component>
+    <component>
+      <section>
+        <code code="11450-4" codeSystem="2.16.840.1.113883.6.1" displayName="Problem List"/>
+        <entry>
+          <act classCode="ACT" moodCode="EVN">
+            <entryRelationship typeCode="SUBJ">
+              <observation classCode="OBS" moodCode="EVN">
+                <code code="55607-6" codeSystem="2.16.840.1.113883.6.1" displayName="Problem"/>
+                <effectiveTime value="19950601000000+0000"/>
+                <value xsi:type="CD" code="59621000" codeSystem="2.16.840.1.113883.6.96" displayName="Hypertension"/>
+              </observation>
+            </entryRelationship>
+          </act>
+        </entry>
+        <entry>
+          <act classCode="ACT" moodCode="EVN">
+            <entryRelationship typeCode="SUBJ">
+              <observation classCode="OBS" moodCode="EVN">
+                <code code="55607-6" codeSystem="2.16.840.1.113883.6.1" displayName="Problem"/>
+                <effectiveTime value="20990101000000+0000"/>
+                <value xsi:type="CD" code="59621000" codeSystem="2.16.840.1.113883.6.96" displayName="Hypertension"/>
+              </observation>
+            </entryRelationship>
+          </act>
+        </entry>
+      </section>
+    </component>
+  </structuredBody></component>
+</ClinicalDocument>

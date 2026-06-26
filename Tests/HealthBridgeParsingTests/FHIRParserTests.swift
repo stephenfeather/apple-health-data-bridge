@@ -61,4 +61,28 @@ final class FHIRParserTests: XCTestCase {
         let o = try XCTUnwrap(parse("observation-hugevalue").observations.first)
         XCTAssertEqual(o.value, .quantity(1e20))
     }
+
+    // MARK: - Plausible-date guard adoption (parity with the LLM path)
+    // The bundle carries Patient.birthDate 2000-01-01 plus three weight observations:
+    // 1995-06-01 (before DOB), 2099-01-01 (after now), 2010-05-05 (plausible). `now` is pinned.
+    private static let fixedNow = LLMResponseContract.parseDate("2026-06-24")!
+
+    func testFHIRDropsObservationBeforeDOB() throws {   // error handler
+        let r = try FHIRParser(now: Self.fixedNow).parse(try fixture("fhir-implausible-dates"), subjectId: "s")
+        XCTAssertFalse(r.observations.contains { $0.value == .quantity(70) },
+                       "1995-06-01 obs predates DOB 2000-01-01 and must be dropped")
+        XCTAssertTrue(r.skipped.contains { $0.reason == .implausibleDate && $0.detail == .dateBeforeDOB })
+    }
+    func testFHIRDropsObservationAfterNow() throws {   // error handler
+        let r = try FHIRParser(now: Self.fixedNow).parse(try fixture("fhir-implausible-dates"), subjectId: "s")
+        XCTAssertFalse(r.observations.contains { $0.value == .quantity(71) },
+                       "2099-01-01 obs is after now and must be dropped")
+        XCTAssertTrue(r.skipped.contains { $0.reason == .implausibleDate && $0.detail == .dateAfterNow })
+    }
+    func testFHIRKeepsPlausibleObservation() throws {   // happy path
+        let r = try FHIRParser(now: Self.fixedNow).parse(try fixture("fhir-implausible-dates"), subjectId: "s")
+        XCTAssertEqual(r.observations.count, 1)
+        XCTAssertEqual(r.observations.first?.value, .quantity(72), "only the 2010-05-05 obs is plausible")
+        XCTAssertEqual(r.skipped.filter { $0.reason == .implausibleDate }.count, 2)
+    }
 }
