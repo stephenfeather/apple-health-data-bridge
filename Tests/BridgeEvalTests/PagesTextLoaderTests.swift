@@ -67,6 +67,20 @@ final class PagesTextLoaderTests: XCTestCase {
         XCTAssertNil(try Fixtures.pagesText(root: root.path, caseName: "nopages"))
     }
 
+    // MARK: - pagesText returns parsed pages AND non-empty raw bytes
+
+    func testPagesTextReturnsParsedPagesAndRawBytes() throws {
+        let root = try makeTempCaseDir("twopages")
+        defer { try? FileManager.default.removeItem(at: root) }
+        // Two pages separated by a form-feed (U+000C), matching the pdftotext canonical format.
+        try write("first page\u{000C}second page",
+                  to: root.appendingPathComponent("twopages/pages.txt"))
+
+        let result = try XCTUnwrap(try Fixtures.pagesText(root: root.path, caseName: "twopages"))
+        XCTAssertEqual(result.pages, ["first page", "second page"])
+        XCTAssertFalse(result.raw.isEmpty)
+    }
+
     // MARK: - temp-dir loader end-to-end through RunCore (pages flow unchanged; inputHash non-empty)
 
     func testTempDirLoaderFlowsThroughRunCore() async throws {
@@ -102,6 +116,7 @@ final class PagesTextLoaderTests: XCTestCase {
             pdfData: txt.raw, pages: txt.pages, model: "m", fixture: "promptonly", sample: 0,
             extractor: StubExtractor(json: goodJSON), expected: expected, subjectId: "subj", now: now)
         XCTAssertFalse(raw.inputHash.isEmpty)   // raw pages.txt bytes -> meaningful inputHash provenance
+        // stub returns a perfect match — CI-stable, not a model-dependent F1 claim
         XCTAssertEqual(score.strict.f1, 1.0, accuracy: 1e-9)
     }
 }

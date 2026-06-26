@@ -105,7 +105,9 @@ enum Fixtures {
         case .pdf:
             return .pdf(pdfURL)                                                // defer the read to run()
         case .pages(let pages):
-            // `pages` is exactly `txt`'s parsed pages; bind `raw` from the SAME non-nil txt (no force-unwrap).
+            // txt is non-nil here: resolveInput returned .pages only because txt?.pages was non-nil,
+            // which required pagesText() to have returned a value. The guard is a defensive trap for
+            // future refactors that might break that invariant — not a reachable runtime path.
             guard let raw = txt?.raw else {
                 throw LoadError(message: "internal: pages resolved without raw bytes for '\(caseName)'")
             }
