@@ -47,10 +47,11 @@ Recreate each under `eval/fixtures/<case>/` with the exact content below.
 
 ### A — `unit-slip` → `partial` w/ `fieldErrors.unit`; strict F1=0 / lenient F1=0.5
 
-Probes unit field-grading. The document prints the UCUM-unusual bracket unit `mm[Hg]`; a faithful model
-copies it (hit), but most models normalize to the non-UCUM `mmHg` → unit mismatch → `partial`. Identity
-(loinc 8480-6 + 2024-03-10) still matches, so it is `partial` with `fieldErrors.unit=true`. Strict F1=0,
-lenient F1=0.5. A model returning exact UCUM scores F1=1.0 — that divergence is the discriminator.
+Probes unit field-grading. The document prints the non-UCUM unit `mmHg`, but gold requires the UCUM
+bracket form `mm[Hg]`. A model that copies the document's `mmHg` verbatim → unit mismatch → `partial`
+(`fieldErrors.unit=true`, strict F1=0 / lenient F1=0.5). A model that normalizes to UCUM `mm[Hg]` →
+`hit` (F1=1.0). Identity (loinc 8480-6 + 2024-03-10) still matches either way, so the unit is the only
+field in error. The discriminator rewards UCUM-normalization knowledge.
 
 `pages.txt`:
 ```

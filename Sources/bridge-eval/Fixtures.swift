@@ -1,4 +1,5 @@
 import Foundation
+import HealthBridgeParsing
 
 /// Loads a fixture case (design §5): `<root>/<case>/expected.json` (always) + `input.pdf` (for `run`).
 /// `loadExpected`/`discoverCases` are platform-free and exercised with the committed Tier A synthetic
@@ -58,6 +59,11 @@ enum Fixtures {
         guard pages.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw LoadError(message: "pages.txt has no extractable text")
         }
+        // D3 large-document cap parity with `PDFText.pages` (`PDFText.swift:34-35`): an oversized
+        // pages.txt would otherwise build huge/costly live-model requests with no guard.
+        guard pages.count <= PDFText.maxPages else {
+            throw LoadError(message: "pages.txt exceeds \(PDFText.maxPages)-page limit; refusing")
+        }
         return pages
     }
 
@@ -83,7 +89,16 @@ enum Fixtures {
     /// bytes (the raw bytes become the case's `inputHash` provenance for PDF-less cases).
     static func pagesText(root: String, caseName: String) throws -> (pages: [String], raw: Data)? {
         let url = pagesTextURL(root: root, caseName: caseName)
-        guard let raw = FileManager.default.contents(atPath: url.path) else { return nil }
+        // `FileManager.contents(atPath:)` returns nil for BOTH absent and unreadable files, masking a
+        // permission/IO error as "missing". Split the two: genuinely-absent stays nil; a real read
+        // failure surfaces loudly as `LoadError` instead of being silently treated as no input.
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let raw: Data
+        do {
+            raw = try Data(contentsOf: url)
+        } catch {
+            throw LoadError(message: "pages.txt for '\(caseName)' is not readable: \(error)")
+        }
         guard let text = String(data: raw, encoding: .utf8) else {
             throw LoadError(message: "pages.txt for '\(caseName)' is not valid UTF-8")
         }
