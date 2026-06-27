@@ -10,6 +10,31 @@ enum FHIRDate {
         return cal
     }
 
+    /// Builds a Date and rejects calendar-impossible DATES that Foundation would
+    /// otherwise silently roll over (e.g. 2000-02-30 -> 2000-03-01). Only the
+    /// year/month/day components actually present in `c` must round-trip unchanged,
+    /// so partial FHIR dates (year-only or year-month) are preserved rather than
+    /// rejected.
+    ///
+    /// TIME components (hour/minute/second) are intentionally NOT compared. The bug
+    /// class is calendar-impossible dates; sub-day time rollover is harmless
+    /// precision drift. Critically, a fractional/leap second that rounds to 60
+    /// (e.g. `09:30:59.6` -> second 60) legitimately carries into the minute, so
+    /// comparing minute/second would WRONGLY drop a valid observation. Date
+    /// integrity is still guarded at day granularity (a time that rolls across
+    /// midnight changes the day and is caught by the .day comparison). FHIR
+    /// time-field ranges are enforced by ModelsR4 at construction, so excluding
+    /// them here loses no malformed-time protection.
+    // TODO (deferred): cross-parser dedup of round-trip guard — see plan 2026-06-27
+    private static func strictDate(from c: DateComponents, calendar: Calendar) -> Date? {
+        guard let date = calendar.date(from: c) else { return nil }
+        let rt = calendar.dateComponents([.year, .month, .day], from: date)
+        if let v = c.year,  rt.year  != v { return nil }
+        if let v = c.month, rt.month != v { return nil }
+        if let v = c.day,   rt.day   != v { return nil }
+        return date
+    }
+
     static func date(from dt: DateTime) -> Date? {
         var c = DateComponents()
         c.year = dt.date.year
@@ -21,7 +46,7 @@ enum FHIRDate {
         } else {
             c.hour = 0; c.minute = 0; c.second = 0   // date-only -> UTC midnight
         }
-        return utcCalendar(dt.timeZone).date(from: c)
+        return strictDate(from: c, calendar: utcCalendar(dt.timeZone))
     }
 
     /// Date-only FHIR `date` (e.g. `Patient.birthDate`). Partial dates (year- or year-month-only)
@@ -32,7 +57,7 @@ enum FHIRDate {
         c.month = d.month.map(Int.init) ?? 1
         c.day = d.day.map(Int.init) ?? 1
         c.hour = 0; c.minute = 0; c.second = 0
-        return utcCalendar(nil).date(from: c)
+        return strictDate(from: c, calendar: utcCalendar(nil))
     }
 
     static func date(from inst: Instant) -> Date? {
@@ -43,6 +68,6 @@ enum FHIRDate {
         c.day = Int(inst.date.day)
         c.hour = Int(inst.time.hour); c.minute = Int(inst.time.minute)
         c.second = Int(NSDecimalNumber(decimal: inst.time.second).doubleValue.rounded())
-        return utcCalendar(inst.timeZone).date(from: c)
+        return strictDate(from: c, calendar: utcCalendar(inst.timeZone))
     }
 }
