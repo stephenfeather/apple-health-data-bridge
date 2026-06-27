@@ -1,4 +1,5 @@
 import Foundation
+import HealthBridgeParsing
 
 /// Loads a fixture case (design §5): `<root>/<case>/expected.json` (always) + `input.pdf` (for `run`).
 /// `loadExpected`/`discoverCases` are platform-free and exercised with the committed Tier A synthetic
@@ -41,5 +42,91 @@ enum Fixtures {
         URL(fileURLWithPath: root)
             .appendingPathComponent(caseName)
             .appendingPathComponent("input.pdf")
+    }
+
+    // MARK: - pages.txt input path (design §5) — pure, platform-free, zero PDFKit.
+
+    /// Form-feed (U+000C) is the canonical page delimiter — exactly what `pdftotext` emits — so a
+    /// `pages.txt` produced from a real extraction is a drop-in. Split on `\f`; drop a single trailing
+    /// empty page (the `pdftotext` trailing-FF artifact) while preserving interior empty pages; reject
+    /// an all-whitespace document for parity with `PDFText.pages` ("no extractable text",
+    /// `PDFText.swift:38-39`).
+    static func parsePages(_ text: String) throws -> [String] {
+        var pages = text.components(separatedBy: "\u{000C}")
+        if pages.count > 1, pages.last?.isEmpty == true {
+            pages.removeLast()   // drop ONLY the trailing FF artifact; interior empties stay
+        }
+        guard pages.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+            throw LoadError(message: "pages.txt has no extractable text")
+        }
+        // D3 large-document cap parity with `PDFText.pages` (`PDFText.swift:34-35`): an oversized
+        // pages.txt would otherwise build huge/costly live-model requests with no guard.
+        guard pages.count <= PDFText.maxPages else {
+            throw LoadError(message: "pages.txt exceeds \(PDFText.maxPages)-page limit; refusing")
+        }
+        return pages
+    }
+
+    /// Pure input-resolution decision. Keeping the branch selection here makes BOTH arms CI-testable;
+    /// only the literal `PDFText.pages` call stays macOS-guarded in `RunCommand.run()`. Precedence:
+    /// `input.pdf` wins (realistic PDFKit path, zero behavior change for existing fixtures); `pages.txt`
+    /// is the PDF-less fallback; neither present is a loud error.
+    enum ResolvedInput: Equatable { case pdf; case pages([String]) }
+
+    static func resolveInput(pdfExists: Bool, pagesText: [String]?) throws -> ResolvedInput {
+        if pdfExists { return .pdf }
+        if let pages = pagesText { return .pages(pages) }
+        throw LoadError(message: "case has neither input.pdf nor pages.txt")
+    }
+
+    static func pagesTextURL(root: String, caseName: String) -> URL {
+        URL(fileURLWithPath: root)
+            .appendingPathComponent(caseName)
+            .appendingPathComponent("pages.txt")
+    }
+
+    /// Thin I/O wrapper: returns `nil` when `pages.txt` is absent, else the parsed pages plus the raw
+    /// bytes (the raw bytes become the case's `inputHash` provenance for PDF-less cases).
+    static func pagesText(root: String, caseName: String) throws -> (pages: [String], raw: Data)? {
+        let url = pagesTextURL(root: root, caseName: caseName)
+        // `FileManager.contents(atPath:)` returns nil for BOTH absent and unreadable files, masking a
+        // permission/IO error as "missing". Split the two: genuinely-absent stays nil; a real read
+        // failure surfaces loudly as `LoadError` instead of being silently treated as no input.
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let raw: Data
+        do {
+            raw = try Data(contentsOf: url)
+        } catch {
+            throw LoadError(message: "pages.txt for '\(caseName)' is not readable: \(error)")
+        }
+        guard let text = String(data: raw, encoding: .utf8) else {
+            throw LoadError(message: "pages.txt for '\(caseName)' is not valid UTF-8")
+        }
+        let pages = try parsePages(text)
+        return (pages, raw)
+    }
+
+    /// REAL-DIRECTORY SEAM (premortem addendum). Does an existence-ONLY check on `input.pdf` — it NEVER
+    /// reads or parses the PDF and NEVER calls `PDFText`. Fully resolves the `.pages` arm. The branch
+    /// choice routes through the CI-tested pure `resolveInput`, so BOTH arms are cross-platform testable;
+    /// `RunCommand.run()` makes the single macOS-only `PDFText.pages` call only in the `.pdf` arm.
+    enum ResolvedCaseInput: Equatable { case pdf(URL); case pages(pages: [String], raw: Data) }
+
+    static func resolveCaseInput(root: String, caseName: String) throws -> ResolvedCaseInput {
+        let pdfURL = inputPDFURL(root: root, caseName: caseName)
+        let pdfExists = FileManager.default.fileExists(atPath: pdfURL.path)   // existence-only, NEVER parsed
+        let txt = pdfExists ? nil : try pagesText(root: root, caseName: caseName)
+        switch try resolveInput(pdfExists: pdfExists, pagesText: txt?.pages) {
+        case .pdf:
+            return .pdf(pdfURL)                                                // defer the read to run()
+        case .pages(let pages):
+            // txt is non-nil here: resolveInput returned .pages only because txt?.pages was non-nil,
+            // which required pagesText() to have returned a value. The guard is a defensive trap for
+            // future refactors that might break that invariant — not a reachable runtime path.
+            guard let raw = txt?.raw else {
+                throw LoadError(message: "internal: pages resolved without raw bytes for '\(caseName)'")
+            }
+            return .pages(pages: pages, raw: raw)
+        }
     }
 }
