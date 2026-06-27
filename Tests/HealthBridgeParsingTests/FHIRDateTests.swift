@@ -98,6 +98,27 @@ final class FHIRDateTests: XCTestCase {
         XCTAssertNotNil(SUT.date(from: leap))
     }
 
+    // MARK: - End-of-day fractional/leap second must NOT be dropped (midnight rollover)
+
+    func testPreservesEndOfDayFractionalTimestamp() throws {
+        // DateTime 2025-03-19T23:59:59.6Z -> second rounds to 60 -> carries to
+        // 2025-03-20T00:00:00Z, CROSSING midnight. The date is fully valid; a day-level
+        // calendar-validity guard would WRONGLY drop it. The fix validates calendar
+        // validity against date-only components, so the full instant is preserved.
+        let fracSecond = try XCTUnwrap(Decimal(string: "59.6"))
+        let frac = try XCTUnwrap(SUT.date(from: DateTime(date: md(2025, 3, 19),
+                                                         time: FHIRTime(hour: 23, minute: 59, second: fracSecond),
+                                                         timezone: utc)))
+        XCTAssertEqual(frac.timeIntervalSince1970, 1_742_428_800, accuracy: 1)
+
+        // Instant leap second 2025-03-19T23:59:60Z -> 2025-03-20T00:00:00Z, same rollover.
+        let leap = Instant(date: InstantDate(year: 2025, month: 3, day: 19),
+                           time: FHIRTime(hour: 23, minute: 59, second: 60),
+                           timezone: utc)
+        let leapDate = try XCTUnwrap(SUT.date(from: leap))
+        XCTAssertEqual(leapDate.timeIntervalSince1970, 1_742_428_800, accuracy: 1)
+    }
+
     // MARK: - Valid full-date regressions (correct epochs preserved)
 
     func testValidFullDatesRegress() throws {
