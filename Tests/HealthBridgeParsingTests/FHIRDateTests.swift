@@ -40,6 +40,8 @@ final class FHIRDateTests: XCTestCase {
         XCTAssertNil(SUT.date(from: md(2000, 2, 30)))
         // November has 30 days
         XCTAssertNil(SUT.date(from: md(2025, 11, 31)))
+        // Feb 29 in a non-leap year date-only
+        XCTAssertNil(SUT.date(from: md(2001, 2, 29)))
     }
 
     func testRejectsCalendarImpossibleInstant() {
@@ -70,16 +72,18 @@ final class FHIRDateTests: XCTestCase {
         let yearMonth = try XCTUnwrap(SUT.date(from: DateTime(date: md(2025, 6))))
         XCTAssertEqual(yearMonth.timeIntervalSince1970, 1_748_736_000, accuracy: 1)
         // Date-only overload year-only (DOB partial path): nil month/day coerced to 1 -> Jan 1 2010
-        XCTAssertNotNil(SUT.date(from: md(2010)))
+        let dateOnlyYearOnly = try XCTUnwrap(SUT.date(from: md(2010)))
+        XCTAssertEqual(dateOnlyYearOnly.timeIntervalSince1970, 1_262_304_000, accuracy: 1)
     }
 
     // MARK: - Seconds that round to 60 must NOT cause a drop (premortem mitigation)
 
-    func testPreservesLeapAndFractionalSeconds() {
+    func testPreservesLeapAndFractionalSeconds() throws {
         // DateTime 09:30:59.6 -> second rounds to 60 -> carries to 09:31:00, SAME day.
         // If minute/second were compared this would wrongly drop; year/month/day-only guard keeps it.
+        let fracSecond = try XCTUnwrap(Decimal(string: "59.6"))
         let frac = SUT.date(from: DateTime(date: md(2025, 3, 19),
-                                           time: FHIRTime(hour: 9, minute: 30, second: Decimal(string: "59.6")!),
+                                           time: FHIRTime(hour: 9, minute: 30, second: fracSecond),
                                            timezone: utc))
         XCTAssertNotNil(frac)
 
