@@ -16,19 +16,27 @@ enum FHIRDate {
     /// so partial FHIR dates (year-only or year-month) are preserved rather than
     /// rejected.
     ///
-    /// TIME components (hour/minute/second) are intentionally NOT compared. The bug
-    /// class is calendar-impossible dates; sub-day time rollover is harmless
-    /// precision drift. Critically, a fractional/leap second that rounds to 60
-    /// (e.g. `09:30:59.6` -> second 60) legitimately carries into the minute, so
-    /// comparing minute/second would WRONGLY drop a valid observation. Date
-    /// integrity is still guarded at day granularity (a time that rolls across
-    /// midnight changes the day and is caught by the .day comparison). FHIR
-    /// time-field ranges are enforced by ModelsR4 at construction, so excluding
-    /// them here loses no malformed-time protection.
+    /// Calendar validity is checked against the DATE components only. A separate
+    /// date-only `DateComponents` (year/month/day, no time) is round-tripped through
+    /// the calendar: if any present component fails to round-trip unchanged the DATE
+    /// is calendar-impossible and we reject. Crucially the returned value is still the
+    /// FULL `date` (with time), so time rollover can never reject a valid observation.
+    /// This matters at the end of day: a fractional/leap second that rounds to 60
+    /// (e.g. `23:59:59.6` -> second 60) carries across midnight into the NEXT day, yet
+    /// the original date is perfectly valid. Validating against date-only components
+    /// keeps that observation instead of silently dropping it as `.noDate`. FHIR
+    /// time-field ranges are enforced by ModelsR4 at construction, so excluding time
+    /// from validation here loses no malformed-time protection; only calendar-
+    /// impossible DATES (e.g. 2000-02-30) are rejected.
     // TODO (deferred): cross-parser dedup of round-trip guard — see plan 2026-06-27
     private static func strictDate(from c: DateComponents, calendar: Calendar) -> Date? {
         guard let date = calendar.date(from: c) else { return nil }
-        let rt = calendar.dateComponents([.year, .month, .day], from: date)
+        var dateOnly = DateComponents()
+        dateOnly.year = c.year
+        dateOnly.month = c.month
+        dateOnly.day = c.day
+        guard let validationDate = calendar.date(from: dateOnly) else { return nil }
+        let rt = calendar.dateComponents([.year, .month, .day], from: validationDate)
         if let v = c.year,  rt.year  != v { return nil }
         if let v = c.month, rt.month != v { return nil }
         if let v = c.day,   rt.day   != v { return nil }
