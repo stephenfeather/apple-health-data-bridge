@@ -84,7 +84,7 @@ final class RunCommandTests: XCTestCase {
             sample: 0, extractor: StubExtractor(json: stubJSON), expected: expected,
             subjectId: "subj", subjectDOB: LLMResponseContract.parseDate("1990-05-01"), now: Self.fixedNow)
         XCTAssertEqual(score.skipHistogram["dateBeforeDOB"], 1)
-        XCTAssertLessThan(score.strict.f1, 1.0)
+        XCTAssertEqual(score.strict.f1, 0.0, accuracy: 1e-9)
     }
 
     // With subjectDOB nil the before-DOB guard never fires, so an ancient date is kept (no skip).
@@ -103,5 +103,6 @@ final class RunCommandTests: XCTestCase {
             sample: 0, extractor: StubExtractor(json: stubJSON), expected: expected,
             subjectId: "subj", subjectDOB: nil, now: Self.fixedNow)
         XCTAssertNil(score.skipHistogram["dateBeforeDOB"])
+        XCTAssertEqual(score.strict.f1, 1.0, accuracy: 1e-9)
     }
 }
