@@ -6,9 +6,11 @@ import HealthBridgeParsing
 /// it unit-tests with a synthetic RawArtifact + ExpectedDoc, zero network. A malformed reply (decode
 /// throws ParseError.malformed) becomes a catastrophic CaseScore.
 enum ScoreCore {
-    static func rescore(raw: RawArtifact, expected: ExpectedDoc, subjectId: String, now: Date) -> CaseScore {
+    static func rescore(raw: RawArtifact, expected: ExpectedDoc, subjectId: String,
+                        subjectDOB: Date? = nil, now: Date) -> CaseScore {
         do {
-            let result = try LLMResponseContract.decode(raw.jsonText, subjectId: subjectId, now: now)
+            let result = try LLMResponseContract.decode(raw.jsonText, subjectId: subjectId,
+                                                        subjectDOB: subjectDOB, now: now)
             let distinct = (try? LLMResponseContract.distinctPatientCount(raw.jsonText)) ?? 0
             let patient = (try? LLMResponseContract.extractedPatient(raw.jsonText)) ?? nil
             return Scorer.score(fixture: raw.fixture, model: raw.model, sample: raw.sample,
@@ -38,8 +40,13 @@ struct ScoreCommand: AsyncParsableCommand {
         // Determinism (Finding 3): use the manifest's recorded reference instant as `now` so the contract's
         // plausibility checks (e.g. dateAfterNow) don't depend on wall-clock time. Fall back to Date() only
         // when the manifest or its parseable referenceDateISO is absent.
-        let referenceDate = (try? ArtifactReader.readManifest(runDir: dir))
+        let manifest = try? ArtifactReader.readManifest(runDir: dir)
+        let referenceDate = manifest
             .flatMap { ISO8601DateFormatter().date(from: $0.referenceDateISO) } ?? Date()
+        // Live==replay (Fix 2): re-derive the EXACT Date the live run's before-DOB guard used by parsing the
+        // RAW yyyy-MM-dd the manifest persisted. Absent (legacy manifest / no --subject-dob) -> nil -> the
+        // guard never fires, preserving today's no-DOB behavior.
+        let subjectDOB = manifest?.subjectDOB.flatMap { LLMResponseContract.parseDate($0) }
         var expectedCache: [String: ExpectedDoc] = [:]
         var scores: [CaseScore] = []
         for raw in raws {
@@ -50,7 +57,8 @@ struct ScoreCommand: AsyncParsableCommand {
                 expected = try Fixtures.loadExpected(root: fixtures, caseName: raw.fixture)
                 expectedCache[raw.fixture] = expected
             }
-            let score = ScoreCore.rescore(raw: raw, expected: expected, subjectId: subjectId, now: referenceDate)
+            let score = ScoreCore.rescore(raw: raw, expected: expected, subjectId: subjectId,
+                                          subjectDOB: subjectDOB, now: referenceDate)
             try ArtifactWriter.writeScored(score, key: raw.key, runDir: dir)
             scores.append(score)
         }

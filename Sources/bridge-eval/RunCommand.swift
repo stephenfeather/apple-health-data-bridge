@@ -111,9 +111,11 @@ struct RunCommand: AsyncParsableCommand {
         }
         let promptHashes = promptHashSet.sorted()
 
+        // Persist the RAW validated --subject-dob string (validate() already rejected malformed values) so
+        // offline rescore parses back the EXACT same Date this live run used — guaranteeing live==replay.
         let manifest = Manifest(timestamp: timestamp, referenceDateISO: referenceDateISO,
                                 promptHashes: promptHashes, models: models, sampleCount: samples,
-                                fixtureNames: cases, subjectDOB: nil)
+                                fixtureNames: cases, subjectDOB: subjectDOB)
         try ArtifactWriter.writeManifest(manifest, runDir: dir)   // BEFORE the loop (Fix 4)
 
         var allScores: [CaseScore] = []
@@ -126,7 +128,7 @@ struct RunCommand: AsyncParsableCommand {
                     let (raw, score) = try await RunCore.runCase(
                         pdfData: pdfData, pages: pages, model: model, fixture: caseName, sample: sample,
                         extractor: extractor, expected: expected, subjectId: subjectId,
-                        subjectDOB: parsedSubjectDOB, now: Date())
+                        subjectDOB: parsedSubjectDOB, now: runInstant)
                     try ArtifactWriter.writeRaw(raw, runDir: dir)
                     try ArtifactWriter.writeScored(score, key: raw.key, runDir: dir)
                     allScores.append(score)
