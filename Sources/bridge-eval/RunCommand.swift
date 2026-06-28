@@ -113,7 +113,7 @@ struct RunCommand: AsyncParsableCommand {
 
         let manifest = Manifest(timestamp: timestamp, referenceDateISO: referenceDateISO,
                                 promptHashes: promptHashes, models: models, sampleCount: samples,
-                                fixtureNames: cases)
+                                fixtureNames: cases, subjectDOB: nil)
         try ArtifactWriter.writeManifest(manifest, runDir: dir)   // BEFORE the loop (Fix 4)
 
         var allScores: [CaseScore] = []
