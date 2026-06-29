@@ -43,8 +43,10 @@ final class EvalModelsTests: XCTestCase {
     func testManifestAndRawArtifactRoundTrip() throws {
         let m = Manifest(timestamp: "2026-06-25T10-47-37Z", referenceDateISO: "2026-06-25T10:47:37Z",
                          promptHashes: ["abc", "xyz"], models: ["m1", "m2"], sampleCount: 3,
-                         fixtureNames: ["f1"])
+                         fixtureNames: ["f1"], subjectDOB: nil)
         XCTAssertEqual(try roundTrip(m), m)
+        // No-DOB regression: a manifest from a run without --subject-dob round-trips with subjectDOB nil.
+        XCTAssertNil(try roundTrip(m).subjectDOB)
         // referenceDateISO must survive UNsanitized so ISO8601DateFormatter can parse it (Finding 3).
         XCTAssertEqual(try roundTrip(m).referenceDateISO, "2026-06-25T10:47:37Z")
         XCTAssertNotNil(ISO8601DateFormatter().date(from: try roundTrip(m).referenceDateISO))
@@ -52,5 +54,23 @@ final class EvalModelsTests: XCTestCase {
                               model: "m1", fixture: "f1", sample: 0, jsonText: "{}",
                               inputTokens: 10, outputTokens: 20, stopReason: "stop", latencyMillis: 1234)
         XCTAssertEqual(try roundTrip(raw), raw)
+    }
+
+    // The DOB the run used must survive encode/decode UNreformatted (raw yyyy-MM-dd), so offline rescore
+    // can parse back the EXACT Date the live path used. And a LEGACY manifest JSON without the field must
+    // decode with subjectDOB == nil (backward compatible — no schema-version field, no throw).
+    func testManifestSubjectDOBRoundTripsAndIsBackwardCompatible() throws {
+        let withDOB = Manifest(timestamp: "2026-06-25T10-47-37Z", referenceDateISO: "2026-06-25T10:47:37Z",
+                               promptHashes: ["abc"], models: ["m"], sampleCount: 1,
+                               fixtureNames: ["f1"], subjectDOB: "1990-05-01")
+        XCTAssertEqual(try roundTrip(withDOB), withDOB)
+        XCTAssertEqual(try roundTrip(withDOB).subjectDOB, "1990-05-01")
+
+        let legacyJSON = """
+        {"timestamp":"2026-06-25T10-47-37Z","referenceDateISO":"2026-06-25T10:47:37Z",
+         "promptHashes":["abc"],"models":["m"],"sampleCount":1,"fixtureNames":["f1"]}
+        """
+        let legacy = try JSONDecoder().decode(Manifest.self, from: Data(legacyJSON.utf8))
+        XCTAssertNil(legacy.subjectDOB)
     }
 }

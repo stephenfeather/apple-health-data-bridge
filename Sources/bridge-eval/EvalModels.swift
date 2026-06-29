@@ -98,6 +98,10 @@ struct Manifest: Codable, Equatable {
     let models: [String]
     let sampleCount: Int
     let fixtureNames: [String]
+    let subjectDOB: String?      // RAW yyyy-MM-dd the run used for the before-DOB guard; nil when --subject-dob
+                                 // was omitted. Stored UNreformatted so offline rescore parses back the EXACT
+                                 // same Date the live path used (live==replay). Optional → legacy manifests
+                                 // without the key decode as nil (backward compatible).
 }
 
 struct RawArtifact: Codable, Equatable {

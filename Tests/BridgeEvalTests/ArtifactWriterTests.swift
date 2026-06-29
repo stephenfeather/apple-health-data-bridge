@@ -23,10 +23,22 @@ final class ArtifactWriterTests: XCTestCase {
         let runDir = tempRunDir()
         let manifest = Manifest(timestamp: "2026-06-25T00-00-00Z", referenceDateISO: "2026-06-25T00:00:00Z",
                                 promptHashes: ["abc"], models: ["m"], sampleCount: 1,
-                                fixtureNames: ["vitals-basic"])
+                                fixtureNames: ["vitals-basic"], subjectDOB: nil)
         try ArtifactWriter.writeManifest(manifest, runDir: runDir)
         let data = try Data(contentsOf: runDir.appendingPathComponent("manifest.json"))
         XCTAssertEqual(try JSONDecoder().decode(Manifest.self, from: data), manifest)
+    }
+
+    func testWriteAndReadbackManifestWithDOB() throws {
+        let runDir = tempRunDir()
+        let manifest = Manifest(timestamp: "2026-06-25T00-00-00Z", referenceDateISO: "2026-06-25T00:00:00Z",
+                                promptHashes: ["abc"], models: ["m"], sampleCount: 1,
+                                fixtureNames: ["vitals-basic"], subjectDOB: "1990-05-01")
+        try ArtifactWriter.writeManifest(manifest, runDir: runDir)
+        let data = try Data(contentsOf: runDir.appendingPathComponent("manifest.json"))
+        let decoded = try JSONDecoder().decode(Manifest.self, from: data)
+        XCTAssertEqual(decoded, manifest)
+        XCTAssertEqual(decoded.subjectDOB, "1990-05-01")
     }
 
     func testWriteRawAndScoredIntoSubdirs() throws {

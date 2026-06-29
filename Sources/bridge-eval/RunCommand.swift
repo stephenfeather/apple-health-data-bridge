@@ -10,6 +10,7 @@ import HealthBridgeParsing
 enum RunCore {
     static func runCase(pdfData: Data, pages: [String], model: String, fixture: String, sample: Int,
                         extractor: any LLMExtractor, expected: ExpectedDoc, subjectId: String,
+                        subjectDOB: Date? = nil,
                         now: Date) async throws -> (raw: RawArtifact, score: CaseScore) {
         let prompt = ExtractionPrompt.make(pages: pages)
         let promptHash = Hashing.promptHash(prompt)
@@ -28,7 +29,7 @@ enum RunCore {
 
         let score: CaseScore
         do {
-            let result = try LLMResponseContract.decode(response.jsonText, subjectId: subjectId, now: now)
+            let result = try LLMResponseContract.decode(response.jsonText, subjectId: subjectId, subjectDOB: subjectDOB, now: now)
             let distinct = (try? LLMResponseContract.distinctPatientCount(response.jsonText)) ?? 0
             let patient = (try? LLMResponseContract.extractedPatient(response.jsonText)) ?? nil
             score = Scorer.score(fixture: fixture, model: model, sample: sample, result: result,
@@ -56,6 +57,16 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "API key (else the provider env var). Never persisted/logged.") var apiKey: String?
     @Option(name: .long, help: "Samples per (fixture, model).") var samples: Int = 1
     @Option(name: .long, help: "Subject id used for the contract's single-subject decode.") var subjectId: String = "eval-subject"
+    @Option(name: .customLong("subject-dob"), help: "Subject DOB (yyyy-MM-dd UTC) for the before-DOB plausible-date guard. Omit to skip the check.") var subjectDOB: String?
+
+    // Hard-error on a malformed --subject-dob rather than silently skipping the guard (flatMap -> nil).
+    // Pure string parsing with no PDFKit dependency, so it lives outside the macOS guard and fires on
+    // every platform — same side of the #if as `var subjectDOB`/`var subjectId`.
+    func validate() throws {
+        if let raw = subjectDOB, LLMResponseContract.parseDate(raw) == nil {
+            throw ValidationError("--subject-dob must be a valid UTC date in yyyy-MM-dd form (got \"\(raw)\")")
+        }
+    }
 
     func run() async throws {
         #if canImport(PDFKit) && os(macOS)
@@ -64,6 +75,8 @@ struct RunCommand: AsyncParsableCommand {
         try Preflight.assertUntracked(runsRoot, role: "runs")
 
         let extractor = try makeExtractor()
+        // Malformed values are already rejected by validate(); a nil here means the flag was omitted.
+        let parsedSubjectDOB = subjectDOB.flatMap { LLMResponseContract.parseDate($0) }
         let cases = try Fixtures.discoverCases(root: fixtures)
         // ONE instant drives both the (sanitized) run-dir name and the manifest's parseable reference
         // date used for deterministic offline rescoring (Finding 3).
@@ -98,9 +111,11 @@ struct RunCommand: AsyncParsableCommand {
         }
         let promptHashes = promptHashSet.sorted()
 
+        // Persist the RAW validated --subject-dob string (validate() already rejected malformed values) so
+        // offline rescore parses back the EXACT same Date this live run used — guaranteeing live==replay.
         let manifest = Manifest(timestamp: timestamp, referenceDateISO: referenceDateISO,
                                 promptHashes: promptHashes, models: models, sampleCount: samples,
-                                fixtureNames: cases)
+                                fixtureNames: cases, subjectDOB: subjectDOB)
         try ArtifactWriter.writeManifest(manifest, runDir: dir)   // BEFORE the loop (Fix 4)
 
         var allScores: [CaseScore] = []
@@ -112,7 +127,8 @@ struct RunCommand: AsyncParsableCommand {
                 for sample in 0..<samples {
                     let (raw, score) = try await RunCore.runCase(
                         pdfData: pdfData, pages: pages, model: model, fixture: caseName, sample: sample,
-                        extractor: extractor, expected: expected, subjectId: subjectId, now: Date())
+                        extractor: extractor, expected: expected, subjectId: subjectId,
+                        subjectDOB: parsedSubjectDOB, now: runInstant)
                     try ArtifactWriter.writeRaw(raw, runDir: dir)
                     try ArtifactWriter.writeScored(score, key: raw.key, runDir: dir)
                     allScores.append(score)
