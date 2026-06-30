@@ -53,4 +53,17 @@ enum IterateCore {
             .joined(separator: "\n")
         return template.replacingOccurrences(of: documentPlaceholder, with: document)
     }
+
+    /// Pool every `score.strict.f1` (across fixtures × models × samples) into one `AggregateF1` — the
+    /// variant-level fitness `selectWinner` compares (plan §4.2). Population stdev (variance = Σ(x-μ)²/n,
+    /// so n=1 → stdev 0), mirroring `Aggregator.aggregateF1`'s convention exactly. Empty scores (a variant
+    /// whose every case errored/was skipped) return `{0,0,0}` — a worst-possible, non-promotable result,
+    /// never `NaN` (plan §6 Task 4 / Risk 6).
+    static func overallStrictF1(scores: [CaseScore]) -> AggregateF1 {
+        let values = scores.map { $0.strict.f1 }
+        guard !values.isEmpty else { return AggregateF1(mean: 0, stdev: 0, n: 0) }
+        let mean = values.reduce(0, +) / Double(values.count)
+        let variance = values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(values.count)
+        return AggregateF1(mean: mean, stdev: variance.squareRoot(), n: values.count)
+    }
 }

@@ -91,4 +91,50 @@ final class IterateCoreTests: XCTestCase {
 
         XCTAssertEqual(renderedBlock, madeBlock)
     }
+
+    // MARK: - overallStrictF1
+
+    /// Minimal `CaseScore` carrying only the `strict.f1` value `overallStrictF1` pools; other fields are
+    /// neutral placeholders (the reduction ignores them).
+    private func caseScore(strictF1: Double, fixture: String = "fx", model: String = "m",
+                           sample: Int = 0) -> CaseScore {
+        let zero = F1(precision: 0, recall: 0, f1: strictF1)
+        return CaseScore(fixture: fixture, model: model, sample: sample, catastrophic: false,
+                         strict: F1(precision: 0, recall: 0, f1: strictF1), lenient: zero,
+                         skipHistogram: [:], matches: [], patient: PatientCorrectness(
+                            distinctCountCorrect: true, identityCorrect: true))
+    }
+
+    func testOverallStrictF1PoolsAllSampleF1s() {
+        // Pool across fixtures/models/samples: f1s = [0.2,0.4,0.6,0.8] → mean 0.5,
+        // population variance = (0.09+0.01+0.01+0.09)/4 = 0.05 → stdev sqrt(0.05).
+        let scores = [
+            caseScore(strictF1: 0.2, fixture: "a", sample: 0),
+            caseScore(strictF1: 0.4, fixture: "a", sample: 1),
+            caseScore(strictF1: 0.6, fixture: "b", model: "m2", sample: 0),
+            caseScore(strictF1: 0.8, fixture: "b", model: "m2", sample: 1),
+        ]
+
+        let agg = IterateCore.overallStrictF1(scores: scores)
+
+        XCTAssertEqual(agg.mean, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(agg.stdev, 0.05.squareRoot(), accuracy: 1e-12)
+        XCTAssertEqual(agg.n, 4)
+    }
+
+    func testOverallStrictF1SingleSampleHasZeroStdev() {
+        let agg = IterateCore.overallStrictF1(scores: [caseScore(strictF1: 0.7)])
+
+        XCTAssertEqual(agg.mean, 0.7, accuracy: 1e-12)
+        XCTAssertEqual(agg.stdev, 0.0, accuracy: 1e-12)
+        XCTAssertEqual(agg.n, 1)
+    }
+
+    func testOverallStrictF1OnEmptyScoresReturnsZeroNotNaN() {
+        let agg = IterateCore.overallStrictF1(scores: [])
+
+        XCTAssertEqual(agg, AggregateF1(mean: 0, stdev: 0, n: 0))
+        XCTAssertFalse(agg.mean.isNaN)
+        XCTAssertFalse(agg.stdev.isNaN)
+    }
 }
