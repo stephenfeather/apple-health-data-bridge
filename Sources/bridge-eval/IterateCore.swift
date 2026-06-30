@@ -124,6 +124,59 @@ enum IterateCore {
                               reason: "promote: Δmean \(deltaMean) cleared all floors and per-fixture margin")
     }
 
+    enum ResumeError: Error, Equatable {
+        /// Incoming options differ from the journal's persisted config — the batches are non-comparable.
+        case configDrift
+    }
+
+    /// Append one entry to the journal at `journalURL`, durably (plan §4.7 step 2 — written immediately
+    /// after each variant, never end-buffered). Reads the existing `IterateJournal` and appends, or, if
+    /// the file is absent, seeds a placeholder header. NOTE: `run()` (Task 9) writes the REAL session/config
+    /// header before the loop, so the placeholder is only reached by the unit path; the append always
+    /// uses the same sorted-keys pretty encoder + atomic write as `ArtifactWriter` for diff-friendliness.
+    static func appendJournal(entry: JournalEntry, journalURL: URL) throws {
+        var journal = readJournal(at: journalURL)
+            ?? IterateJournal(session: "", config: placeholderConfig, entries: [])
+        journal.entries.append(entry)
+        try FileManager.default.createDirectory(at: journalURL.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try journalEncoder().encode(journal).write(to: journalURL, options: .atomic)
+    }
+
+    /// Variant ids still needing evaluation: all ids minus those with ≥1 SUCCESS entry (failure == nil).
+    /// Failure-only ids are RETRIED and never-seen ids are included (plan §4.7 step 3 — transient failures
+    /// must not be terminal). Order follows `all`.
+    static func pendingVariants(all: [String], journal: IterateJournal) -> [String] {
+        let succeeded = Set(journal.entries.filter { $0.failure == nil }.map { $0.variantId })
+        return all.filter { !succeeded.contains($0) }
+    }
+
+    /// The running champion on resume: the most-recent entry whose decision promoted it (nil if none).
+    static func resumeChampion(journal: IterateJournal) -> JournalEntry? {
+        journal.entries.last { $0.decision?.promoted == true }
+    }
+
+    /// Refuse a resume whose incoming config differs from the journal's persisted config — mixing
+    /// incomparable fitness conditions would corrupt the decision trace (plan §4.7 step 4).
+    static func assertResumable(config: IterateConfig, journal: IterateJournal) throws {
+        guard journal.config == config else { throw ResumeError.configDrift }
+    }
+
+    private static let placeholderConfig = IterateConfig(
+        models: [], samples: 0, fixturesRoot: "", noiseThreshold: 0,
+        minImprovement: 0, minImprovementLowN: 0, maxFixtureRegression: 0)
+
+    private static func readJournal(at url: URL) -> IterateJournal? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(IterateJournal.self, from: data)
+    }
+
+    private static func journalEncoder() -> JSONEncoder {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]   // matches ArtifactWriter for diff-friendliness
+        return e
+    }
+
     /// First fixture(×model) — in deterministic key order — whose challenger `strictF1.mean` drops more
     /// than `maxFixtureRegression` below the champion's for the SAME fixture. Fixtures the challenger
     /// evaluated but the champion did not have no regression baseline and are skipped. Returns nil if no

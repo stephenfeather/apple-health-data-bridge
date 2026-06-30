@@ -291,4 +291,72 @@ final class IterateCoreTests: XCTestCase {
         XCTAssertEqual(manifestPromptHashes, [raw.promptHash])
         XCTAssertNotEqual(raw.promptHash, Hashing.promptHash(ExtractionPrompt.make(pages: pages)))
     }
+
+    // MARK: - journal + resume helpers
+
+    private func config(samples: Int = 1) -> IterateConfig {
+        IterateConfig(models: ["m"], samples: samples, fixturesRoot: "eval/fixtures",
+                      noiseThreshold: 1.0, minImprovement: 0.01, minImprovementLowN: 0.05,
+                      maxFixtureRegression: 0.05)
+    }
+
+    private func successEntry(_ id: String, promoted: Bool) -> JournalEntry {
+        JournalEntry(variantId: id, promptHash: "hash-\(id)", strictF1Mean: 0.7, strictF1Stdev: 0.05,
+                     sampleCount: 5, runDir: "runs/\(id)", evaluatedAt: "2026-06-29T00:00:00Z",
+                     decision: DecisionRecord(promoted: promoted, deltaMean: 0.1, seDiff: 0.02,
+                                              blockingFixture: nil, reason: "ok"),
+                     failure: nil)
+    }
+
+    private func failureEntry(_ id: String) -> JournalEntry {
+        JournalEntry(variantId: id, promptHash: nil, strictF1Mean: nil, strictF1Stdev: nil,
+                     sampleCount: 0, runDir: nil, evaluatedAt: "2026-06-29T00:01:00Z",
+                     decision: nil, failure: "transport error")
+    }
+
+    func testAppendJournalCreatesThenAppendsInOrder() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("journal.json")
+
+        try IterateCore.appendJournal(entry: successEntry("a", promoted: true), journalURL: url)
+        let after1 = try JSONDecoder().decode(IterateJournal.self, from: Data(contentsOf: url))
+        XCTAssertEqual(after1.entries.map { $0.variantId }, ["a"])
+
+        try IterateCore.appendJournal(entry: failureEntry("b"), journalURL: url)
+        let after2 = try JSONDecoder().decode(IterateJournal.self, from: Data(contentsOf: url))
+        XCTAssertEqual(after2.entries.map { $0.variantId }, ["a", "b"])
+    }
+
+    func testAppendJournalRecordsFailureEntry() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("journal.json")
+        let failure = failureEntry("x")
+
+        try IterateCore.appendJournal(entry: failure, journalURL: url)
+        let decoded = try JSONDecoder().decode(IterateJournal.self, from: Data(contentsOf: url))
+
+        XCTAssertEqual(decoded.entries, [failure])
+        XCTAssertNil(decoded.entries[0].decision)
+        XCTAssertNil(decoded.entries[0].promptHash)
+        XCTAssertEqual(decoded.entries[0].sampleCount, 0)
+        XCTAssertEqual(decoded.entries[0].failure, "transport error")
+    }
+
+    func testResumeRetriesFailedButSkipsSucceeded() {
+        // A succeeded, B only failed, C never seen → pending = [B, C] (A skipped, B retried, C new).
+        let journal = IterateJournal(session: "s", config: config(),
+                                     entries: [successEntry("a", promoted: true), failureEntry("b")])
+
+        XCTAssertEqual(IterateCore.pendingVariants(all: ["a", "b", "c"], journal: journal), ["b", "c"])
+        XCTAssertEqual(IterateCore.resumeChampion(journal: journal)?.variantId, "a")
+    }
+
+    func testResumeRefusesOnConfigDrift() {
+        let journal = IterateJournal(session: "s", config: config(samples: 1), entries: [])
+
+        XCTAssertThrowsError(try IterateCore.assertResumable(config: config(samples: 3), journal: journal))
+        XCTAssertNoThrow(try IterateCore.assertResumable(config: config(samples: 1), journal: journal))
+    }
 }
