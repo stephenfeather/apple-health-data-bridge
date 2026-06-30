@@ -11,8 +11,10 @@ enum RunCore {
     static func runCase(pdfData: Data, pages: [String], model: String, fixture: String, sample: Int,
                         extractor: any LLMExtractor, expected: ExpectedDoc, subjectId: String,
                         subjectDOB: Date? = nil,
-                        now: Date) async throws -> (raw: RawArtifact, score: CaseScore) {
-        let prompt = ExtractionPrompt.make(pages: pages)
+                        now: Date, promptOverride: String? = nil) async throws -> (raw: RawArtifact, score: CaseScore) {
+        // `iterate` passes a rendered variant prompt here; `run` passes nil → the shipping default prompt.
+        // promptHash, LLMRequest.instructions, ArtifactWriter.key, RawArtifact.promptHash all flow off this.
+        let prompt = promptOverride ?? ExtractionPrompt.make(pages: pages)
         let promptHash = Hashing.promptHash(prompt)
         let inputHash = Hashing.sha256Hex(pdfData)
         let request = LLMRequest(pages: pages, instructions: prompt, model: model)
