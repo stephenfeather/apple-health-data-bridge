@@ -44,7 +44,9 @@ enum IterateCore {
     /// Render a per-fixture prompt by substituting the page-numbered document block for the single
     /// `{{DOCUMENT}}` placeholder (plan §4.1, §4.5). The block format MUST stay byte-identical to
     /// `ExtractionPrompt.make` so a `renderPrompt`-rendered variant and the `make()`-rendered baseline
-    /// inject the same document — Task 3b's golden test is the drift tripwire if `make()` ever changes.
+    /// inject the same document. DRIFT TRIPWIRE: if `make()`'s page-block format ever changes, the test
+    /// `IterateCoreTests.testRenderPromptDocumentBlockMatchesExtractionPromptMake` fails — re-sync the
+    /// line below to match `make()` exactly (no shared helper: `make()` is off-limits production source).
     static func renderPrompt(template: String, pages: [String]) -> String {
         let document = pages.enumerated()
             .map { "----- PAGE \($0.offset + 1) -----\n\($0.element)" }

@@ -1,5 +1,6 @@
 import XCTest
 @testable import bridge_eval
+import HealthBridgeParsing
 
 final class IterateCoreTests: XCTestCase {
     /// Pattern C: a fresh temp dir per test, cleaned up after.
@@ -65,5 +66,29 @@ final class IterateCoreTests: XCTestCase {
         XCTAssertTrue(rendered.contains("----- PAGE 1 -----\nfirst page text"))
         XCTAssertTrue(rendered.contains("----- PAGE 2 -----\nsecond page text"))
         XCTAssertFalse(rendered.contains("{{DOCUMENT}}"))
+    }
+
+    /// Fairness golden test (premortem target #5): the baseline variant is rendered by
+    /// `ExtractionPrompt.make` directly while all other variants go through `renderPrompt`. The
+    /// baseline-vs-variant comparison is only fair if the injected document block is byte-identical
+    /// between the two paths. `make()` lives in HealthBridgeParsing and may not be refactored into a
+    /// shared helper (no production-source change), so `renderPrompt` necessarily duplicates the block
+    /// format — this pins that duplication against drift. If `make()`'s page-block format ever changes,
+    /// this test trips and `renderPrompt` must be re-synced.
+    func testRenderPromptDocumentBlockMatchesExtractionPromptMake() throws {
+        let pages = ["alpha page one", "beta page two", "gamma page three"]
+
+        // The block `make()` embeds, extracted between its BEGIN/END markers.
+        let made = ExtractionPrompt.make(pages: pages)
+        let beginMarker = "BEGIN DOCUMENT\n"
+        let endMarker = "\nEND DOCUMENT"
+        let beginRange = try XCTUnwrap(made.range(of: beginMarker))
+        let endRange = try XCTUnwrap(made.range(of: endMarker, range: beginRange.upperBound..<made.endIndex))
+        let madeBlock = String(made[beginRange.upperBound..<endRange.lowerBound])
+
+        // The block `renderPrompt` substitutes for {{DOCUMENT}} (template is the bare placeholder).
+        let renderedBlock = IterateCore.renderPrompt(template: "{{DOCUMENT}}", pages: pages)
+
+        XCTAssertEqual(renderedBlock, madeBlock)
     }
 }
