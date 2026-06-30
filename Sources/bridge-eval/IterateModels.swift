@@ -60,7 +60,9 @@ struct JournalEntry: Codable, Equatable {
 }
 
 /// Batch parameters persisted in the journal header; compared on resume to refuse incomparable mixes
-/// (plan §4.7 step 4).
+/// (plan §4.7 step 4). `subjectDOB` is included because cases are scored against it (the before-DOB
+/// plausible-date guard) — a resume with a different --subject-dob would silently change the fitness.
+/// Optional → legacy journals without the key decode as nil (backward compatible).
 struct IterateConfig: Codable, Equatable {
     let models: [String]
     let samples: Int
@@ -69,6 +71,7 @@ struct IterateConfig: Codable, Equatable {
     let minImprovement: Double
     let minImprovementLowN: Double
     let maxFixtureRegression: Double
+    let subjectDOB: String?
 }
 
 /// The append-only iterate journal (plan §4.3): a session id, the batch config, and the ordered entries.

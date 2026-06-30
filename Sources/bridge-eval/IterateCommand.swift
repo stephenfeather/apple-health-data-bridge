@@ -55,6 +55,14 @@ struct IterateCommand: AsyncParsableCommand {
         guard models.count == 1 else {
             throw ValidationError("--models must specify exactly one model (the decision rule is per-model)")
         }
+        if let cap = maxVariants, cap <= 0 {
+            throw ValidationError("--max-variants must be > 0 when set")
+        }
+        // Allow-list mirrors makeExtractor's switch (case-insensitive) so an unknown provider fails at
+        // parse time, not after fixtures are read.
+        guard ["anthropic", "openai"].contains(provider.lowercased()) else {
+            throw ValidationError("--provider must be one of anthropic|openai (got \"\(provider)\")")
+        }
         if let raw = subjectDOB, LLMResponseContract.parseDate(raw) == nil {
             throw ValidationError("--subject-dob must be a valid UTC date in yyyy-MM-dd form (got \"\(raw)\")")
         }
@@ -95,15 +103,16 @@ struct IterateCommand: AsyncParsableCommand {
         let config = IterateConfig(models: models, samples: samples, fixturesRoot: fixtures,
                                    noiseThreshold: noiseThreshold, minImprovement: minImprovement,
                                    minImprovementLowN: minImprovementLowN,
-                                   maxFixtureRegression: maxFixtureRegression)
+                                   maxFixtureRegression: maxFixtureRegression, subjectDOB: subjectDOB)
 
         let sessionDir = URL(fileURLWithPath: iterateRoot)
         let journalURL = sessionDir.appendingPathComponent("journal.json")
 
         // Resume vs. fresh session. On resume: refuse config drift, then drop already-succeeded variants
         // and seed the champion. On a fresh session: write the REAL journal header (session + true config)
-        // BEFORE any append, so appendJournal never seeds its zeroed placeholder (Task 7 flag).
-        let resumeJournal = readJournal(at: journalURL)
+        // BEFORE any append, so appendJournal never seeds its zeroed placeholder (Task 7 flag). A
+        // present-but-corrupt journal THROWS here (readJournal) rather than being blanked (PR #16 finding 1).
+        let resumeJournal = try IterateCore.readJournal(at: journalURL)
         if let existing = resumeJournal {
             try IterateCore.assertResumable(config: config, journal: existing)
         }
@@ -113,8 +122,11 @@ struct IterateCommand: AsyncParsableCommand {
             try writeJSON(IterateJournal(session: session, config: config, entries: []), to: journalURL)
         }
 
-        // Candidates: baseline first (override nil → make()), then variants in lexical order.
+        // Candidates: baseline first (override nil → make()), then variants in lexical order. Refuse a
+        // human variant that collides with the reserved synthetic id "baseline" (PR #16 finding 4).
         let loaded = try IterateCore.loadVariants(from: URL(fileURLWithPath: variants))
+        try IterateCore.assertNoBaselineCollision(variantIds: loaded.map { $0.id },
+                                                  includeBaseline: includeBaseline)
         var candidates: [Candidate] = []
         if includeBaseline { candidates.append(Candidate(id: "baseline", template: nil)) }
         candidates.append(contentsOf: loaded.map { Candidate(id: $0.id, template: $0.template) })
@@ -153,10 +165,11 @@ struct IterateCommand: AsyncParsableCommand {
 
         for candidate in candidates {
             // §4.4 per-variant budget gate: never start a variant we cannot finish.
-            if let budget = budgetCalls, callsSpent + perVariantCost > budget {
+            if !IterateCore.canAfford(callsSpent: callsSpent, perVariantCost: perVariantCost, budget: budgetCalls) {
                 skipped.append(candidate.id)
-                FileHandle.standardError.write(Data(
-                    "budget reached (\(callsSpent)/\(budget) calls) — stopping before \(candidate.id)\n".utf8))
+                let msg = "budget reached (\(callsSpent)/\(budgetCalls.map(String.init) ?? "∞") calls) "
+                    + "— stopping before \(candidate.id)\n"
+                FileHandle.standardError.write(Data(msg.utf8))
                 break
             }
 
@@ -197,6 +210,9 @@ struct IterateCommand: AsyncParsableCommand {
                     let pdfData = pdfDataByCase[caseName] ?? Data()
                     let override = renderedByCase[caseName]   // nil for baseline
                     for sample in 0..<samples {
+                        // Count the call at ATTEMPT time so a throw mid-flight still spends budget and
+                        // later variants can't exceed --budget-calls (PR #16 finding 3).
+                        callsSpent += 1
                         let (raw, score) = try await RunCore.runCase(
                             pdfData: pdfData, pages: pages, model: model, fixture: caseName, sample: sample,
                             extractor: extractor, expected: expected, subjectId: subjectId,
@@ -207,7 +223,6 @@ struct IterateCommand: AsyncParsableCommand {
                         observed.insert(raw.promptHash)
                         inputTokens += raw.inputTokens ?? 0
                         outputTokens += raw.outputTokens ?? 0
-                        callsSpent += 1
                     }
                 }
 
@@ -313,11 +328,6 @@ struct IterateCommand: AsyncParsableCommand {
         case "openai": return OpenAIExtractor(apiKey: key)
         default: throw ValidationError("unknown provider '\(provider)' — use anthropic or openai")
         }
-    }
-
-    private func readJournal(at url: URL) -> IterateJournal? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(IterateJournal.self, from: data)
     }
 
     private func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {

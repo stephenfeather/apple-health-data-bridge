@@ -13,6 +13,16 @@ enum IterateCore {
         case placeholderCount(variantId: String, found: Int)
     }
 
+    enum JournalError: Error, Equatable {
+        /// The journal file exists but could not be decoded — refuse rather than blank the history.
+        case corrupt(path: String)
+    }
+
+    enum BaselineError: Error, Equatable {
+        /// A human variant uses the reserved synthetic id "baseline" while --include-baseline is on.
+        case reservedIdCollision
+    }
+
     /// Load every `*.txt` file in `dirURL` as a `PromptVariant`, in lexical filename order (plan §4.1).
     /// `id` = filename stem; `template` = file contents. Each template MUST contain exactly one
     /// `{{DOCUMENT}}` placeholder — zero or more than one throws `LoadError.placeholderCount` (a
@@ -20,9 +30,11 @@ enum IterateCore {
     /// Non-`.txt` entries are ignored.
     static func loadVariants(from dirURL: URL) throws -> [PromptVariant] {
         let fileURLs = try FileManager.default.contentsOfDirectory(
-            at: dirURL, includingPropertiesForKeys: nil)
+            at: dirURL, includingPropertiesForKeys: [.isDirectoryKey])
         let txtURLs = fileURLs
             .filter { $0.pathExtension == "txt" }
+            // Skip a *directory* named like `foo.txt` — only regular files are variant templates.
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory != true }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
 
         return try txtURLs.map { url in
@@ -39,6 +51,20 @@ enum IterateCore {
     /// Count occurrences of the document placeholder in a template (non-overlapping).
     private static func placeholderCount(in template: String) -> Int {
         template.components(separatedBy: documentPlaceholder).count - 1
+    }
+
+    /// Refuse a human variant that uses the reserved synthetic id "baseline" while --include-baseline is
+    /// on — otherwise the built-in baseline shadows the human one and resume silently skips it.
+    static func assertNoBaselineCollision(variantIds: [String], includeBaseline: Bool) throws {
+        guard includeBaseline else { return }
+        if variantIds.contains("baseline") { throw BaselineError.reservedIdCollision }
+    }
+
+    /// Whether a variant costing `perVariantCost` live calls can START without exceeding `budget`
+    /// (nil = unbounded). The §4.4 per-variant gate: never begin a variant we cannot finish.
+    static func canAfford(callsSpent: Int, perVariantCost: Int, budget: Int?) -> Bool {
+        guard let budget = budget else { return true }
+        return callsSpent + perVariantCost <= budget
     }
 
     /// Render a per-fixture prompt by substituting the page-numbered document block for the single
@@ -135,7 +161,9 @@ enum IterateCore {
     /// header before the loop, so the placeholder is only reached by the unit path; the append always
     /// uses the same sorted-keys pretty encoder + atomic write as `ArtifactWriter` for diff-friendliness.
     static func appendJournal(entry: JournalEntry, journalURL: URL) throws {
-        var journal = readJournal(at: journalURL)
+        // A present-but-corrupt journal throws here (readJournal) rather than being blanked — the
+        // append-only history is durable (PR #16 finding 1).
+        var journal = try readJournal(at: journalURL)
             ?? IterateJournal(session: "", config: placeholderConfig, entries: [])
         journal.entries.append(entry)
         try FileManager.default.createDirectory(at: journalURL.deletingLastPathComponent(),
@@ -182,11 +210,19 @@ enum IterateCore {
 
     private static let placeholderConfig = IterateConfig(
         models: [], samples: 0, fixturesRoot: "", noiseThreshold: 0,
-        minImprovement: 0, minImprovementLowN: 0, maxFixtureRegression: 0)
+        minImprovement: 0, minImprovementLowN: 0, maxFixtureRegression: 0, subjectDOB: nil)
 
-    private static func readJournal(at url: URL) -> IterateJournal? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(IterateJournal.self, from: data)
+    /// Read the journal: a MISSING file returns nil (fine — fresh session), but a present-but-undecodable
+    /// file THROWS `JournalError.corrupt` rather than nil, so a malformed journal.json is never silently
+    /// overwritten/blanked on resume (PR #16 finding 1). I/O errors propagate.
+    static func readJournal(at url: URL) throws -> IterateJournal? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        do {
+            return try JSONDecoder().decode(IterateJournal.self, from: data)
+        } catch {
+            throw JournalError.corrupt(path: url.path)
+        }
     }
 
     private static func journalEncoder() -> JSONEncoder {

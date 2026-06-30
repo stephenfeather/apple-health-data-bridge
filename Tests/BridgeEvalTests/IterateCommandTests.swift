@@ -57,4 +57,16 @@ final class IterateCommandTests: XCTestCase {
     func testIterateValidateRejectsMultipleModels() {
         XCTAssertThrowsError(try IterateCommand.parse(["--models", "a", "b"]))
     }
+
+    func testIterateValidateRejectsUnknownProvider() {
+        XCTAssertThrowsError(try IterateCommand.parse(["--models", "m", "--provider", "foo"]))
+        XCTAssertNoThrow(try IterateCommand.parse(["--models", "m", "--provider", "OpenAI"]))   // case-insensitive
+    }
+
+    func testIterateValidateRejectsNonPositiveMaxVariants() {
+        XCTAssertThrowsError(try IterateCommand.parse(["--models", "m", "--max-variants", "0"]))
+        XCTAssertThrowsError(try IterateCommand.parse(["--models", "m", "--max-variants", "-1"]))
+        XCTAssertNoThrow(try IterateCommand.parse(["--models", "m", "--max-variants", "2"]))
+        XCTAssertNoThrow(try IterateCommand.parse(["--models", "m"]))   // nil ok
+    }
 }

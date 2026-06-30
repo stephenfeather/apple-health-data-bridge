@@ -294,10 +294,10 @@ final class IterateCoreTests: XCTestCase {
 
     // MARK: - journal + resume helpers
 
-    private func config(samples: Int = 1) -> IterateConfig {
+    private func config(samples: Int = 1, subjectDOB: String? = nil) -> IterateConfig {
         IterateConfig(models: ["m"], samples: samples, fixturesRoot: "eval/fixtures",
                       noiseThreshold: 1.0, minImprovement: 0.01, minImprovementLowN: 0.05,
-                      maxFixtureRegression: 0.05)
+                      maxFixtureRegression: 0.05, subjectDOB: subjectDOB)
     }
 
     private func successEntry(_ id: String, promoted: Bool) -> JournalEntry {
@@ -407,5 +407,67 @@ final class IterateCoreTests: XCTestCase {
         let journal = IterateJournal(session: "s", config: config(), entries: [champ])
 
         XCTAssertEqual(IterateCore.resumeChampionFixtures(journal: journal, baseDir: base), [])
+    }
+
+    // MARK: - PR #16 hardening
+
+    func testReadJournalReturnsNilWhenMissing() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertNil(try IterateCore.readJournal(at: dir.appendingPathComponent("nope.json")))
+    }
+
+    func testReadJournalThrowsOnCorruptFile() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("journal.json")
+        try "not json at all".write(to: url, atomically: true, encoding: .utf8)
+        // A present-but-corrupt journal must NOT decode to nil (which would silently blank the history).
+        XCTAssertThrowsError(try IterateCore.readJournal(at: url))
+    }
+
+    func testAppendJournalRefusesToOverwriteCorruptJournal() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("journal.json")
+        try "garbage".write(to: url, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try IterateCore.appendJournal(entry: failureEntry("x"), journalURL: url))
+        // Append-only history preserved: the corrupt file is left untouched, not blanked.
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "garbage")
+    }
+
+    func testAssertResumableRejectsSubjectDOBDrift() {
+        let journal = IterateJournal(session: "s", config: config(subjectDOB: "1990-05-01"), entries: [])
+        XCTAssertThrowsError(
+            try IterateCore.assertResumable(config: config(subjectDOB: "2000-01-01"), journal: journal))
+        XCTAssertNoThrow(
+            try IterateCore.assertResumable(config: config(subjectDOB: "1990-05-01"), journal: journal))
+    }
+
+    func testCanAffordBudgetGate() {
+        XCTAssertTrue(IterateCore.canAfford(callsSpent: 0, perVariantCost: 4, budget: nil))   // unbounded
+        XCTAssertTrue(IterateCore.canAfford(callsSpent: 6, perVariantCost: 4, budget: 10))    // fits exactly
+        XCTAssertFalse(IterateCore.canAfford(callsSpent: 7, perVariantCost: 4, budget: 10))   // would exceed
+    }
+
+    func testAssertNoBaselineCollisionThrows() {
+        XCTAssertThrowsError(
+            try IterateCore.assertNoBaselineCollision(variantIds: ["baseline", "a"], includeBaseline: true))
+        XCTAssertNoThrow(
+            try IterateCore.assertNoBaselineCollision(variantIds: ["baseline", "a"], includeBaseline: false))
+        XCTAssertNoThrow(
+            try IterateCore.assertNoBaselineCollision(variantIds: ["a", "b"], includeBaseline: true))
+    }
+
+    func testLoadVariantsIgnoresDirectoryWithTxtExtension() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write("alpha {{DOCUMENT}}", named: "a.txt", in: dir)
+        try FileManager.default.createDirectory(
+            at: dir.appendingPathComponent("foo.txt"), withIntermediateDirectories: true)
+
+        let variants = try IterateCore.loadVariants(from: dir)
+        XCTAssertEqual(variants.map { $0.id }, ["a"])   // the foo.txt directory is ignored, no crash
     }
 }
