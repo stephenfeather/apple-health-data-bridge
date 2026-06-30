@@ -36,6 +36,21 @@ final class IterateCoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         try write("this template has no placeholder", named: "bad.txt", in: dir)
 
-        XCTAssertThrowsError(try IterateCore.loadVariants(from: dir))
+        XCTAssertThrowsError(try IterateCore.loadVariants(from: dir)) { error in
+            XCTAssertEqual(error as? IterateCore.LoadError,
+                           .placeholderCount(variantId: "bad", found: 0))
+        }
+    }
+
+    func testLoadVariantsRejectsDuplicatePlaceholder() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write("first {{DOCUMENT}} then second {{DOCUMENT}}", named: "dup.txt", in: dir)
+
+        XCTAssertThrowsError(try IterateCore.loadVariants(from: dir)) { error in
+            // Pins the >1 branch: exactly-one validation must reject two placeholders too.
+            XCTAssertEqual(error as? IterateCore.LoadError,
+                           .placeholderCount(variantId: "dup", found: 2))
+        }
     }
 }
