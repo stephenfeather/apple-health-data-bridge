@@ -3,9 +3,9 @@ import ArgumentParser
 @testable import bridge_eval
 
 final class RootCommandTests: XCTestCase {
-    func testRootHasThreeSubcommands() {
+    func testRootHasFourSubcommands() {
         let names = BridgeEval.configuration.subcommands.map { $0.configuration.commandName }
-        XCTAssertEqual(Set(names.compactMap { $0 }), ["run", "score", "report"])
+        XCTAssertEqual(Set(names.compactMap { $0 }), ["run", "score", "report", "iterate"])
     }
 
     func testRootCommandName() {
