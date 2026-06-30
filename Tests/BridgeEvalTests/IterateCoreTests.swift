@@ -359,4 +359,53 @@ final class IterateCoreTests: XCTestCase {
         XCTAssertThrowsError(try IterateCore.assertResumable(config: config(samples: 3), journal: journal))
         XCTAssertNoThrow(try IterateCore.assertResumable(config: config(samples: 1), journal: journal))
     }
+
+    func testResumeChampionReloadsPerFixtureStatsFromResultsJson() throws {
+        let base = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Write a results.json with known per-fixture stats into the champion's run dir.
+        let runDirRel = "runs/winner-2026"
+        let stats = [
+            FixtureModelStats(fixture: "alpha", model: "m",
+                              strictF1: AggregateF1(mean: 0.8, stdev: 0.0, n: 5),
+                              lenientF1: AggregateF1(mean: 0.8, stdev: 0.0, n: 5),
+                              outputConsistency: 1.0, catastrophicRate: 0.0),
+            FixtureModelStats(fixture: "beta", model: "m",
+                              strictF1: AggregateF1(mean: 0.6, stdev: 0.0, n: 5),
+                              lenientF1: AggregateF1(mean: 0.6, stdev: 0.0, n: 5),
+                              outputConsistency: 1.0, catastrophicRate: 0.0),
+        ]
+        let results = RunResults(promptHashes: ["h"], stats: stats)
+        let runDir = base.appendingPathComponent(runDirRel)
+        try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try enc.encode(results).write(to: runDir.appendingPathComponent("results.json"))
+
+        // A journal whose promoted champion entry points at that run dir.
+        var champ = successEntry("winner", promoted: true)
+        champ = JournalEntry(variantId: champ.variantId, promptHash: champ.promptHash,
+                             strictF1Mean: champ.strictF1Mean, strictF1Stdev: champ.strictF1Stdev,
+                             sampleCount: champ.sampleCount, runDir: runDirRel,
+                             evaluatedAt: champ.evaluatedAt, decision: champ.decision, failure: nil)
+        let journal = IterateJournal(session: "s", config: config(), entries: [champ])
+
+        let reloaded = IterateCore.resumeChampionFixtures(journal: journal, baseDir: base)
+
+        XCTAssertEqual(reloaded, stats)   // real per-fixture stats, not []
+    }
+
+    func testResumeChampionFixturesReturnsEmptyWhenResultsMissing() throws {
+        let base = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let champ = JournalEntry(variantId: "winner", promptHash: "h", strictF1Mean: 0.7, strictF1Stdev: 0.0,
+                                 sampleCount: 5, runDir: "runs/does-not-exist",
+                                 evaluatedAt: "2026-06-29T00:00:00Z",
+                                 decision: DecisionRecord(promoted: true, deltaMean: 0, seDiff: 0,
+                                                          blockingFixture: nil, reason: "seed"),
+                                 failure: nil)
+        let journal = IterateJournal(session: "s", config: config(), entries: [champ])
+
+        XCTAssertEqual(IterateCore.resumeChampionFixtures(journal: journal, baseDir: base), [])
+    }
 }

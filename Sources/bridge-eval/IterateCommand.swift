@@ -72,9 +72,13 @@ struct IterateCommand: AsyncParsableCommand {
         let model = models[0]   // validate() guarantees exactly one
         let cases = try Fixtures.discoverCases(root: fixtures)
 
-        // Read each fixture's pages once (mirrors run()'s pre-pass; the only PDFText call stays here).
+        // Read each fixture's pages AND expected gold once (mirrors run()'s pre-pass; the only PDFText call
+        // stays here). loadExpected is hoisted into this fixture-level pre-pass so a malformed (Tier-B,
+        // PHI) expected.json throws loudly BEFORE the batch — it can never land in a per-variant failure
+        // string (Note 3 PHI hardening).
         var pagesByCase: [String: [String]] = [:]
         var pdfDataByCase: [String: Data] = [:]
+        var expectedByCase: [String: ExpectedDoc] = [:]
         for caseName in cases {
             switch try Fixtures.resolveCaseInput(root: fixtures, caseName: caseName) {
             case .pdf(let pdfURL):
@@ -85,6 +89,7 @@ struct IterateCommand: AsyncParsableCommand {
                 pagesByCase[caseName] = pages
                 pdfDataByCase[caseName] = raw
             }
+            expectedByCase[caseName] = try Fixtures.loadExpected(root: fixtures, caseName: caseName)
         }
 
         let config = IterateConfig(models: models, samples: samples, fixturesRoot: fixtures,
@@ -121,16 +126,22 @@ struct IterateCommand: AsyncParsableCommand {
         }
         if let cap = maxVariants { candidates = Array(candidates.prefix(cap)) }
 
-        // Seed the champion from the resumed journal (pooled metrics only; per-fixture stats live on disk
-        // and are treated as absent for the resumed incumbent — the pooled rule still applies).
-        var champion: ChampionState? = resumeJournal
-            .flatMap { IterateCore.resumeChampion(journal: $0) }
-            .flatMap { entry -> ChampionState? in
-                guard let mean = entry.strictF1Mean, let sd = entry.strictF1Stdev else { return nil }
-                return ChampionState(id: entry.variantId,
-                                     pooled: AggregateF1(mean: mean, stdev: sd, n: entry.sampleCount),
-                                     fixtures: [], template: nil)
+        // Seed the champion from the resumed journal. Reload its per-fixture stats from results.json so the
+        // per-fixture regression guard (cond-3) is active from the FIRST comparison against the incumbent
+        // (Note 2 / premortem #8). If the results.json is gone, fall back to [] with a warning.
+        var champion: ChampionState? = nil
+        if let existing = resumeJournal, let entry = IterateCore.resumeChampion(journal: existing),
+           let mean = entry.strictF1Mean, let sd = entry.strictF1Stdev {
+            let fixtures = IterateCore.resumeChampionFixtures(journal: existing, baseDir: sessionDir)
+            if fixtures.isEmpty, entry.runDir != nil {
+                let warn = "warning: could not reload per-fixture stats for resumed champion "
+                    + "\(entry.variantId) — per-fixture guard inactive until the next in-session promotion\n"
+                FileHandle.standardError.write(Data(warn.utf8))
             }
+            champion = ChampionState(id: entry.variantId,
+                                     pooled: AggregateF1(mean: mean, stdev: sd, n: entry.sampleCount),
+                                     fixtures: fixtures, template: nil)
+        }
 
         let perVariantCost = cases.count * models.count * samples
         var callsSpent = 0
@@ -181,7 +192,7 @@ struct IterateCommand: AsyncParsableCommand {
                 var scores: [CaseScore] = []
                 var observed = Set<String>()
                 for caseName in cases {
-                    let expected = try Fixtures.loadExpected(root: fixtures, caseName: caseName)
+                    let expected = expectedByCase[caseName] ?? ExpectedDoc(patients: [], observations: [])
                     let pages = pagesByCase[caseName] ?? []
                     let pdfData = pdfDataByCase[caseName] ?? Data()
                     let override = renderedByCase[caseName]   // nil for baseline

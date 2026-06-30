@@ -156,6 +156,24 @@ enum IterateCore {
         journal.entries.last { $0.decision?.promoted == true }
     }
 
+    /// Reload the resumed champion's per-fixture `[FixtureModelStats]` from its run dir's results.json so
+    /// the per-fixture regression guard (cond-3, §4.2) stays fully active across a resume — without this
+    /// the incumbent would carry empty stats and cond-3 would be vacuously satisfied for every challenger.
+    /// Returns `[]` if there is no promoted champion, no recorded runDir, or the results.json is
+    /// missing/unreadable (the caller warns and proceeds; the pooled rule still applies).
+    static func resumeChampionFixtures(journal: IterateJournal, baseDir: URL) -> [FixtureModelStats] {
+        guard let entry = resumeChampion(journal: journal), let rel = entry.runDir else { return [] }
+        return loadResultsStats(runDir: baseDir.appendingPathComponent(rel))
+    }
+
+    /// Decode `RunResults.stats` from `runDir/results.json`; `[]` on any missing/unreadable/invalid file.
+    static func loadResultsStats(runDir: URL) -> [FixtureModelStats] {
+        let url = runDir.appendingPathComponent("results.json")
+        guard let data = try? Data(contentsOf: url),
+              let results = try? JSONDecoder().decode(RunResults.self, from: data) else { return [] }
+        return results.stats
+    }
+
     /// Refuse a resume whose incoming config differs from the journal's persisted config — mixing
     /// incomparable fitness conditions would corrupt the decision trace (plan §4.7 step 4).
     static func assertResumable(config: IterateConfig, journal: IterateJournal) throws {
