@@ -62,8 +62,11 @@ Add an operator-driven, budget-bounded `iterate` subcommand that evaluates a **h
 Each variant's batch of `[CaseScore]` is pooled to one overall `AggregateF1` over every `score.strict.f1` (across fixtures × models × samples) via `IterateCore.overallStrictF1`. Let champion `C{mean_c, sd_c, n_c}` and challenger `X{mean_x, sd_x, n_x}`. Define the standard error of the difference:
 
 ```
-SE_diff = sqrt( sd_c^2 / n_c  +  sd_x^2 / n_x )
+SE_diff = sqrt( sampleVar_c / n_c  +  sampleVar_x / n_x )
+where sampleVar = sd_pop^2 * n / (n - 1)   // Bessel correction; see note
 ```
+
+> **Population→sample stdev correction (Codex):** `AggregateF1.stdev` is a **population** stdev (✓ VERIFIED `Aggregator.swift` — `variance = Σ(x-μ)²/n`). Population stdev *underestimates* uncertainty at small `n`, so using it raw in `SE_diff` would make the rule **anti-conservative exactly at low-but-≥2 `n`** (e.g. `n=2`) — the opposite of the intended incumbency bias. `selectWinner` therefore converts to the unbiased sample variance `sampleVar = sd_pop² · n/(n-1)` before forming `SE_diff` (it has `n` from `AggregateF1`). This conversion is the `n≥2` branch; the `n<2` branch still uses the `minImprovementLowN` floor (sample variance is undefined at `n=1`).
 
 **Promote the challenger iff ALL THREE hold:**
 1. **Absolute floor:** `mean_x - mean_c >= minImprovement` (default `0.01`).
@@ -112,7 +115,13 @@ struct JournalEntry: Codable, Equatable {       // superset of scout's ChampionE
     let failure: String?          // nil = evaluated OK; non-nil = error summary (NO PHI). §4.7
 }
 
-struct IterateJournal: Codable, Equatable { let session: String; var entries: [JournalEntry] }
+struct IterateConfig: Codable, Equatable {      // persisted once; checked on resume (§4.7 step 4)
+    let models: [String]; let samples: Int; let fixturesRoot: String
+    let noiseThreshold: Double; let minImprovement: Double
+    let minImprovementLowN: Double; let maxFixtureRegression: Double
+}
+
+struct IterateJournal: Codable, Equatable { let session: String; let config: IterateConfig; var entries: [JournalEntry] }
 ```
 
 The running champion is the most-recent `promoted == true` entry. Scout's `ChampionEntry` is folded into `JournalEntry` (we record *all* evaluations, the full append-only trace, not just winners).
@@ -144,7 +153,7 @@ Defaulted + trailing → the existing `RunCommand.run()` call site compiles unch
 
 **Resolution (revised per Gemini — a single source of truth, not a parallel re-render):** the original plan proposed a separate `IterateCore.promptHashes` helper that *re-renders and re-hashes* the override — but that re-introduces the very "compute the same string in two places" drift it's trying to prevent. Instead:
 
-1. **Render each `(variant, fixture)` override string EXACTLY ONCE** in the `run()` shell, into a local (e.g. `renderedByFixture[fixture] = renderPrompt(template:, pages:)`). For the baseline variant, the "rendered" value is `ExtractionPrompt.make(pages:)` itself (equivalently, pass `promptOverride: nil`).
+1. **Render each `(variant, fixture)` override string EXACTLY ONCE** in the `run()` shell, into a local (e.g. `renderedByFixture[fixture] = renderPrompt(template:, pages:)`). For the **baseline** variant, pass `promptOverride: nil` so `runCase` computes `ExtractionPrompt.make(pages:)` itself, and compute the manifest's baseline hash as `Hashing.promptHash(ExtractionPrompt.make(pages:))` — i.e. baseline's manifest hash and artifact hash both derive from the SAME `make()` call path (single source preserved; no rendered string for baseline). Only non-baseline variants use the rendered-string path.
 2. **Hash that same stored string** for the manifest (`Hashing.promptHash(rendered)`), AND **pass that same stored string** as `promptOverride` to `runCase`. Because it is the identical `String` value, `runCase`'s internal `Hashing.promptHash(prompt)` is byte-identical → `manifest.promptHashes` == `RawArtifact.promptHash` **by construction**, with no second rendering path to drift.
 3. **Belt-and-suspenders cross-check:** `RawArtifact.promptHash` is already returned from `runCase` (✓ VERIFIED). After a variant's run loop, assert the set of observed `raw.promptHash` values is a subset of the manifest's `promptHashes`; a mismatch is a hard error (catches any future regression instantly).
 
@@ -155,9 +164,10 @@ This removes the brittle re-render helper entirely. Task 6 becomes: *render-once
 `RunCore.runCase` **throws** on a transport/network error, and neither `RunCommand.run()` nor a naive iterate loop catches per-sample (✓ VERIFIED `RunCommand.swift`). A multi-variant live batch is long and expensive (variants × fixtures × models × samples API calls); a single transient 429/503/timeout near the end would otherwise **abort the whole batch and lose every completed variant's result** if the journal were written only at the end.
 
 **Required by this plan:**
-1. **Per-variant fault isolation.** In the iterate loop, wrap each variant's evaluation in `do/catch`. On a thrown error, record a `failed` journal entry for that variant (with the error summary, no PHI) and **continue to the next variant** rather than propagating. (Sample-level granularity is a nice-to-have; variant-level is the floor.)
+1. **Per-variant fault isolation.** In the iterate loop, wrap each variant's evaluation in `do/catch`. On a thrown error, record a `failure` journal entry for that variant (with the error summary, no PHI) and **continue to the next variant** rather than propagating. (Sample-level granularity is a nice-to-have; variant-level is the floor.)
 2. **Incremental journal append.** `appendJournal` writes **immediately after each variant completes** (the §4.3 append-only design already supports this) — never buffered to the end. An interrupted batch (Ctrl-C, crash, killed process) leaves every completed variant durably recorded, plus a valid champion-so-far.
-3. **Basic resume.** On startup, if the target `--iterate-root` session already has a `journal.json`, the loop **skips variants whose `variantId` already has a terminal entry** and resumes the champion from the most-recent `promoted == true` entry. Re-running the same command is therefore idempotent and cheap — it does not re-pay for completed variants. (Resume is keyed on `variantId`; changing a variant's `.txt` content without renaming it is operator error — note in docs.)
+3. **Resume that RETRIES failures (Codex fix — failures are NOT terminal).** Network errors are *transient* (✓ VERIFIED `runCase` throws on transport error). So resume must skip only variants with a **successful evaluation** entry (`failure == nil`) and **re-attempt** any whose only prior entries are `failure` — otherwise one transient 503 permanently buries a variant, defeating the resilience goal. `pendingVariants` therefore = all variant ids minus those with ≥1 success entry. The champion resumes from the most-recent `promoted == true` entry. Re-running is idempotent for *succeeded* variants (no re-pay) while *failed* ones get another chance.
+4. **Config-drift guard on resume (Codex).** A resumed session whose `--models`/`--samples`/`--fixtures`/thresholds differ from the original batch would make journal entries non-comparable (different fitness conditions). On resume, compare the incoming options against a small `config` block persisted in the journal header; on mismatch, **refuse with a clear error** (operator must start a new session dir) rather than silently mixing incomparable results. (Resume is keyed on `variantId`; changing a variant's `.txt` content without renaming it is operator error — see open Q 8.7.)
 
 This turns a fragile, all-or-nothing batch into a checkpointed one. It is the single most important operational fix from the external review.
 
@@ -215,7 +225,7 @@ Each task: **RED** (failing test first — named, with why it fails) → **GREEN
 
 ### Task 5a — `selectWinner` margin rule (n>=2)
 - **RED:** `testSelectWinnerPromotesWhenGainExceedsNoiseMargin`, `testSelectWinnerRetainsChampionWithinNoise`, `testSelectWinnerTieKeepsChampion` — synthetic `AggregateF1` pairs. Fail — absent.
-- **GREEN:** implement conditions (1) absolute floor + (2) `noiseThreshold * SE_diff` for the `n>=2` branch; return `WinnerDecision` with deltas + reason.
+- **GREEN:** implement conditions (1) absolute floor + (2) `noiseThreshold * SE_diff` for the `n>=2` branch, **converting `AggregateF1.stdev` (population) to sample variance `sd²·n/(n-1)` before forming `SE_diff`** (Codex — §4.2 note); return `WinnerDecision` with deltas + reason. Add `testSelectWinnerUsesSampleVarianceAtN2` — a +0.03 gain that would pass with population stdev but not with the (larger) sample-variance SE_diff must NOT promote at `n=2`.
 
 ### Task 5b — `selectWinner` low-n guard
 - **RED:** `testSelectWinnerLowNRequiresLargerAbsoluteFloor` — `n_c=1` and/or `n_x=1` (SE_diff would be 0); a +0.02 gain must NOT promote, a +0.06 gain must. Fails — current logic promotes on any positive gain.
@@ -230,12 +240,12 @@ Each task: **RED** (failing test first — named, with why it fails) → **GREEN
 - **GREEN:** in the `run()` shell, render each `(variant, fixture)` override ONCE into a stored value; hash THAT for the manifest and pass THAT same string as `promptOverride` (baseline → `make()`/`nil`). Add the belt-and-suspenders post-loop assertion that observed `raw.promptHash` ⊆ `manifest.promptHashes`. No separate re-rendering helper (§4.6 revised — single source of truth).
 
 ### Task 7 — `appendJournal` + journal types + resume helper
-- **RED:** `testAppendJournalCreatesThenAppendsInOrder` (Pattern C, temp dir) — append to a nonexistent path → file with 1 entry; append again → 2 entries, order preserved, valid JSON. Plus `testAppendJournalRecordsFailureEntry` — a `failure`-populated entry (nil decision/metrics) round-trips. Plus `testResumeSkipsVariantsAlreadyJournaled` — given a journal with entries for ids {A,B}, `IterateCore.pendingVariants(all:journalURL:)` returns only the not-yet-done ids and the resumed champion (most-recent `promoted==true`). Fail — absent.
-- **GREEN:** define `IterateJournal`/`JournalEntry`/`DecisionRecord`; `IterateCore.appendJournal(entry:journalURL:)` reads-or-empty, appends, atomic write with the sorted-keys pretty encoder (matching `ArtifactWriter`); `IterateCore.pendingVariants`/`resumeChampion` pure helpers for §4.7 resume.
+- **RED:** `testAppendJournalCreatesThenAppendsInOrder` (Pattern C, temp dir) — append to a nonexistent path → file with 1 entry; append again → 2 entries, order preserved, valid JSON. Plus `testAppendJournalRecordsFailureEntry` — a `failure`-populated entry (nil decision/metrics) round-trips. Plus `testResumeRetriesFailedButSkipsSucceeded` — given a journal where id A has a SUCCESS entry and id B has only a FAILURE entry, `IterateCore.pendingVariants(all:journal:)` returns **{B}** (A skipped, B retried) and `resumeChampion` returns the most-recent `promoted==true`. Plus `testResumeRefusesOnConfigDrift` — a journal whose `config` differs from the incoming options makes `IterateCore.assertResumable(config:journal:)` throw. Fail — absent.
+- **GREEN:** define `IterateJournal`/`IterateConfig`/`JournalEntry`/`DecisionRecord`; `IterateCore.appendJournal(entry:journalURL:)` reads-or-empty, appends, atomic write with the sorted-keys pretty encoder (matching `ArtifactWriter`); `IterateCore.pendingVariants` (skip ids with ≥1 success, RETRY failure-only ids — §4.7 step 3), `resumeChampion`, and `assertResumable` (config-drift guard — §4.7 step 4) pure helpers.
 
 ### Task 8 — `IterateCommand` options + `validate()`
-- **RED:** `IterateCommandTests.testIterateCommandParsesOptions` (parse `--variants --fixtures --iterate-root --models --samples --noise-threshold --min-improvement --max-variants --budget-calls --include-baseline`) and `testIterateValidateRejectsNonPositiveSamplesAndBudget`. Fail — fields/validate absent.
-- **GREEN:** add `@Option` fields (house style `.long` / `.customLong`) with documented defaults; `validate()` enforces `samples > 0`, `budget-calls > 0` when present, `noise-threshold >= 0`, and (deferred to run-time existence, like `run`) the variants dir.
+- **RED:** `IterateCommandTests.testIterateCommandParsesOptions` (parse `--variants --fixtures --iterate-root --models --samples --noise-threshold --min-improvement --min-improvement-low-n --max-fixture-regression --max-variants --budget-calls --include-baseline`) and `testIterateValidateRejectsNonPositiveSamplesAndBudget` and `testIterateValidateRejectsMultipleModels` (single-model enforcement — Codex). Fail — fields/validate absent.
+- **GREEN:** add `@Option` fields (house style `.long` / `.customLong`) with documented defaults; `validate()` enforces `samples > 0`, `budget-calls > 0` when present, `noise-threshold >= 0`, **exactly one `--models` entry** (the decision rule is only meaningful per-model — §4.2; hard-reject rather than silently averaging across models), and (deferred to run-time existence, like `run`) the variants dir.
 
 ### Task 9 — `IterateCommand.run()` integration shell (macOS-guarded, no new unit test)
 - **No RED unit test** (network path; mirrors `RunCommand.run()` being integration-only — design §10). Composed entirely of Task 2–8 helpers that are already offline-tested.
@@ -243,7 +253,13 @@ Each task: **RED** (failing test first — named, with why it fails) → **GREEN
   1. `Preflight.assertUntracked(iterateRoot)` and `Preflight.assertUntracked(fixtures)`.
   2. `loadVariants`; prepend baseline if `--include-baseline`. **Resume (§4.7):** if the session journal exists, drop already-journaled variants via `pendingVariants` and seed champion via `resumeChampion`.
   3. Read each fixture's pages once (reuse `Fixtures` discovery as `run` does).
-  4. For each pending variant **within budget** (per-variant budget check, §4.4): **wrapped in `do/catch` (§4.7)** — render each per-fixture override ONCE → hash the rendered string for the manifest and pass that SAME string as `promptOverride` (§4.6 render-once) → per (fixture, model, sample) call `RunCore.runCase(..., promptOverride: rendered)` → `ArtifactWriter` writes the run dir → assert observed `raw.promptHash` ⊆ manifest hashes → `Aggregator.aggregate` (per-fixture stats) → `overallStrictF1` (pooled) → `selectWinner` vs current champion (pooled + per-fixture) → **`appendJournal` immediately** → on promotion, rewrite `champion.txt`/`champion.json` (§4.8) and update champion. **On a thrown error:** append a `failure` journal entry and `continue` to the next variant — never abort the batch.
+  4. For each pending variant **within budget** (per-variant budget check, §4.4): **wrapped in `do/catch` (§4.7)** —
+     a. render each per-fixture override ONCE; hash the rendered string (§4.6 render-once);
+     b. **write that variant's `Manifest` (with the rendered hashes) to its run dir BEFORE the first `runCase` call** — mirrors `run()`'s manifest-before-network durability (✓ VERIFIED `RunCommand.run()` writes manifest before the loop); a crash/throw mid-variant then still leaves a replayable run dir (Codex blocker 2);
+     c. per (fixture, model, sample) call `RunCore.runCase(..., promptOverride: rendered)` passing that SAME string → `ArtifactWriter` writes raw+scored;
+     d. assert observed `raw.promptHash` ⊆ the manifest's hashes (cross-check);
+     e. `Aggregator.aggregate` (per-fixture stats) → `overallStrictF1` (pooled) → `selectWinner` vs current champion (pooled + per-fixture) → **`appendJournal` immediately** → on promotion, rewrite `champion.txt`/`champion.json` (§4.8) and update champion.
+     **On a thrown error:** append a `failure` journal entry and `continue` to the next variant — never abort the batch (the variant remains retriable on resume, §4.7 step 3).
   5. Print the final champion summary to stderr, including **batch token cost** (sum `RawArtifact.inputTokens`/`outputTokens`, ✓ VERIFIED captured) and any failed/skipped variants. If **no challenger variants** were evaluated (empty variants dir, or only the synthetic `baseline`), print an explicit `"no challengers evaluated — champion is the baseline"` notice rather than implying a comparison happened.
 - Optionally add a `SmokeTests`-style parse smoke check; live behavior is operator-local Tier B only.
 
@@ -264,7 +280,10 @@ Each task: **RED** (failing test first — named, with why it fails) → **GREEN
 | # | Risk | Why it bites | Mitigation |
 |---|---|---|---|
 | 1 | **Decision rule** (`selectWinner`) | `n<2` → population stdev 0 → `SE_diff` 0 → promotes on noise; macro-pooling can hide a per-fixture regression behind an overall gain; pooling across fixtures (and models) makes stdev reflect *fixture difficulty*, not sampling noise, so the margin is NOT a real significance test; default `noiseThreshold`/floors are unvalidated | Low-n absolute-floor guard (Task 5b); record full `deltaMean`/`seDiff`/`reason` per entry; knobs configurable; incumbency bias on ties. **Run one model per batch** (see §4.2). Per-fixture stats stay on disk for post-hoc review. Treat auto-promotion as a hint; tune defaults empirically before relying on it. |
-| 2 | **promptHash pre-pass divergence** | `RunCommand.run()` re-derives the default hash independently; reusing it records the wrong hash for overridden variants | Dedicated `IterateCore.promptHashes` helper + its own test (Task 6); `run()` must NOT call the `run` pre-pass. |
+| 2 | **promptHash pre-pass divergence** | `RunCommand.run()` re-derives the default hash independently; reusing it records the wrong hash for overridden variants | **Render-once / hash-the-sent-string / pass-the-same-string** + observed-hash ⊆ manifest cross-check (§4.6 revised; Task 6). No separate re-render helper — single source of truth. |
+| 11 | **Resume buries transient failures** (Codex) | Failures recorded as terminal + resume skips any terminal entry → one transient 503 permanently skips a variant | `pendingVariants` skips only SUCCESS entries and RETRIES failure-only ids (§4.7 step 3, Task 7). |
+| 12 | **iterate loses manifest-before-network durability** (Codex) | `run` writes manifest pre-loop; iterate Task 9 didn't, leaving a non-replayable crash window | Write each variant's manifest BEFORE its first `runCase` (§Task 9 step 4b). |
+| 13 | **Population stdev is anti-conservative at n≥2** (Codex) | `AggregateF1.stdev` is population stdev → underestimates uncertainty at small n → SE_diff too small | `selectWinner` converts to sample variance `sd²·n/(n-1)` before SE_diff (§4.2 note, Task 5a). |
 | 3 | **Variant-injection consistency** | A template missing/typo'd `{{DOCUMENT}}` sends the model no document → catastrophic scores masquerade as "bad variant" | `loadVariants` validates exactly-one placeholder and throws (Task 2); `renderPrompt` test asserts no residual placeholder (Task 3). |
 | 4 | Baseline seeding ambiguity | Unclear champion seed if `--include-baseline` off and the set is unordered | Default `--include-baseline true`; deterministic lexical variant order; document seed = first evaluated. |
 | 5 | **`renderPrompt` document-block drift** | `renderPrompt` re-implements `make()`'s page-block format; baseline uses `make()` directly, variants use `renderPrompt`. If the blocks differ (now, or after a future `make()` change), baseline-vs-variant deltas are silently confounded by document formatting, not prompt content — and `make()` may not be refactored to a shared helper (no production-source change) | Byte-identity golden test pinning `renderPrompt`'s block to `make()`'s actual output (Task 3b) + a drift-tripwire comment in `renderPrompt`. |
@@ -280,7 +299,7 @@ Each task: **RED** (failing test first — named, with why it fails) → **GREEN
 - [ ] **8.2** Default `noiseThreshold` (1.0?) and `minImprovementLowN` (0.05?) — placeholders pending an empirical batch.
 - [ ] **8.3** `--iterate-root` default `eval/iterate/` (mirrors `eval/runs/`) — confirm; add to `.gitignore` if not already covered (PHI in run dirs).
 - [ ] **8.4** `--variants` default `eval/prompts/` — prompt templates contain **no patient data** (operator instructions only), so unlike run dirs they MAY be committed/version-controlled. Confirm whether `eval/prompts/` should be tracked (shareable curated prompts) or gitignored. Note: `Preflight.assertUntracked` is intentionally NOT applied to the variants dir (only `iterateRoot` + `fixtures`), which is correct either way.
-- [ ] **8.5** `--models` — for a meaningful decision, an `iterate` batch should pass a **single** model (see §4.2 limitation). Decide whether `validate()` should warn (or hard-reject) multiple `--models` in `iterate`, or leave it as documented operator guidance.
+- [x] **8.5** `--models` — RESOLVED (Codex): `validate()` **hard-rejects** more than one `--models` entry in `iterate` (the decision rule is only meaningful per-model). Task 8.
 - [ ] **8.6** Default `maxFixtureRegression` (0.05?) — the per-fixture anti-overfitting margin (§4.2 condition 3); placeholder pending an empirical batch alongside 8.2.
 - [ ] **8.7** Resume semantics (§4.7) — confirm resume keys on `variantId` only (changing a variant's content without renaming it is operator error). Decide whether to hash-check the variant template against the journaled `promptHash` and warn on drift.
 
@@ -322,4 +341,15 @@ Gemini independently confirmed the §4.2 statistics concern and surfaced three i
 - **Variant staleness (design fork):** user chose to KEEP full-prompt `.txt` over delta-injection; documented as accepted tradeoff (§4.1; Risk 10; open Q 8.6).
 - Nits noted: low-n floor / `maxFixtureRegression` defaults are placeholders (open Q 8.2, 8.6); batch token cost now surfaced (Task 9).
 
-**Pipeline:** scout → architect → premortem (deep) → Gemini adversarial review → mitigations folded. No HIGH blockers remain; the open questions are tuning/confirmation, not redesign.
+### External adversarial review — Codex (gpt-5.3-codex, high), 2026-06-29
+
+Codex ran after quota freed up and challenged the post-Gemini plan, finding two bugs introduced *while folding in Gemini's fixes* plus a statistical correction — all verified with file:line. All folded in:
+
+- **Resume buried transient failures (BLOCKER):** failures were terminal + resume skipped any terminal entry → one transient 503 permanently skips a variant. Fixed: `pendingVariants` skips only SUCCESS entries and **retries failure-only ids**; config-drift guard added (§4.7 steps 3–4; Task 7; Risk 11).
+- **iterate lost `run`'s manifest-before-network durability (BLOCKER):** Task 9 now writes each variant's manifest BEFORE its first `runCase` (§Task 9 step 4b; Risk 12).
+- **Population stdev anti-conservative at n≥2 (correction):** `AggregateF1.stdev` is population stdev (✓ VERIFIED); `selectWinner` now converts to sample variance `sd²·n/(n-1)` before `SE_diff` (§4.2 note; Task 5a; Risk 13).
+- **Single-model now ENFORCED** in `validate()` (was only advised) — open Q 8.5 resolved (Task 8).
+- Nits: baseline override path made explicit (§4.6 step 1); stale Risk #2 `promptHashes`-helper reference corrected.
+- Confirmed: §4.6 hash fix is directionally correct against the real code path; Task 3b golden test will hold against the actual `make()` interpolation; TDD ordering coherent (caveat: integration semantics concentrated in untested Task 9 — accepted, mirrors `run`).
+
+**Pipeline:** scout → architect → premortem (deep) → Gemini review → Codex review → mitigations folded. No HIGH blockers remain; the open questions (8.1–8.4, 8.6–8.7) are tuning/confirmation, not redesign.
