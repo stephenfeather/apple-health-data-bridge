@@ -77,9 +77,12 @@ enum IterateCore {
     /// `sampleVar = sd_pop²·n/(n-1)` BEFORE forming the standard error of the difference (§4.2 Codex note):
     ///   SE_diff = sqrt( sampleVar_c/n_c + sampleVar_x/n_x )  =  sqrt( sd_c²/(n_c-1) + sd_x²/(n_x-1) ).
     static func selectWinner(champion: AggregateF1, challenger: AggregateF1,
+                             championFixtures: [FixtureModelStats] = [],
+                             challengerFixtures: [FixtureModelStats] = [],
                              minImprovement: Double = 0.01,
                              noiseThreshold: Double = 1.0,
-                             minImprovementLowN: Double = 0.05) -> WinnerDecision {
+                             minImprovementLowN: Double = 0.05,
+                             maxFixtureRegression: Double = 0.05) -> WinnerDecision {
         let deltaMean = challenger.mean - champion.mean
 
         // Condition 1 — absolute floor (applies to every branch).
@@ -88,26 +91,54 @@ enum IterateCore {
                                   reason: "retain: Δmean \(deltaMean) below absolute floor \(minImprovement)")
         }
 
-        // Low-n trap (n<2): population stdev of a single sample is 0, so SE_diff collapses to 0 and the
-        // n≥2 margin would promote on any positive jitter. Sample variance is undefined at n=1, so the
-        // noise margin is replaced by the larger minImprovementLowN floor (plan §4.2 condition 2 else-branch).
-        guard champion.n >= 2, challenger.n >= 2 else {
-            let promoted = deltaMean >= minImprovementLowN
-            return WinnerDecision(promoted: promoted, deltaMean: deltaMean, seDiff: 0, blockingFixture: nil,
-                                  reason: promoted
-                                    ? "promote: Δmean \(deltaMean) cleared low-n floor \(minImprovementLowN)"
-                                    : "retain: Δmean \(deltaMean) below low-n floor \(minImprovementLowN)")
+        // Condition 2 — noise margin. Low-n trap (n<2): population stdev of a single sample is 0, so
+        // SE_diff collapses to 0 and the n≥2 margin would promote on any positive jitter. Sample variance
+        // is undefined at n=1, so the noise margin is replaced by the larger minImprovementLowN floor
+        // (plan §4.2 condition 2 else-branch).
+        let seDiff: Double
+        if champion.n >= 2, challenger.n >= 2 {
+            seDiff = standardErrorOfDifference(champion: champion, challenger: challenger)
+            guard deltaMean >= noiseThreshold * seDiff else {
+                return WinnerDecision(promoted: false, deltaMean: deltaMean, seDiff: seDiff, blockingFixture: nil,
+                                      reason: "retain: Δmean \(deltaMean) within noise margin \(noiseThreshold * seDiff)")
+            }
+        } else {
+            seDiff = 0
+            guard deltaMean >= minImprovementLowN else {
+                return WinnerDecision(promoted: false, deltaMean: deltaMean, seDiff: 0, blockingFixture: nil,
+                                      reason: "retain: Δmean \(deltaMean) below low-n floor \(minImprovementLowN)")
+            }
         }
 
-        // Condition 2 — noise margin, using the Bessel-corrected sample variance.
-        let seDiff = standardErrorOfDifference(champion: champion, challenger: challenger)
-        guard deltaMean >= noiseThreshold * seDiff else {
-            return WinnerDecision(promoted: false, deltaMean: deltaMean, seDiff: seDiff, blockingFixture: nil,
-                                  reason: "retain: Δmean \(deltaMean) within noise margin \(noiseThreshold * seDiff)")
+        // Condition 3 — per-fixture regression guard (anti-overfitting). The pooled mean can rise while a
+        // single fixture craters; pooled SE_diff reflects fixture-difficulty variance, not sampling noise,
+        // so conditions 1+2 alone cannot catch this. Block promotion if ANY fixture(×model) the challenger
+        // evaluated drops more than maxFixtureRegression below the champion's for that fixture (§4.2 cond 3).
+        if let blocking = firstRegressingFixture(champion: championFixtures, challenger: challengerFixtures,
+                                                 maxFixtureRegression: maxFixtureRegression) {
+            return WinnerDecision(promoted: false, deltaMean: deltaMean, seDiff: seDiff, blockingFixture: blocking,
+                                  reason: "retain: fixture \(blocking) regressed beyond \(maxFixtureRegression)")
         }
 
         return WinnerDecision(promoted: true, deltaMean: deltaMean, seDiff: seDiff, blockingFixture: nil,
-                              reason: "promote: Δmean \(deltaMean) exceeds noise margin \(noiseThreshold * seDiff)")
+                              reason: "promote: Δmean \(deltaMean) cleared all floors and per-fixture margin")
+    }
+
+    /// First fixture(×model) — in deterministic key order — whose challenger `strictF1.mean` drops more
+    /// than `maxFixtureRegression` below the champion's for the SAME fixture. Fixtures the challenger
+    /// evaluated but the champion did not have no regression baseline and are skipped. Returns nil if no
+    /// fixture regresses beyond the margin.
+    private static func firstRegressingFixture(champion: [FixtureModelStats], challenger: [FixtureModelStats],
+                                               maxFixtureRegression: Double) -> String? {
+        let championByKey = Dictionary(champion.map { ("\($0.fixture)\u{0}\($0.model)", $0) },
+                                       uniquingKeysWith: { first, _ in first })
+        return challenger
+            .sorted { ($0.fixture, $0.model) < ($1.fixture, $1.model) }
+            .first { x in
+                guard let c = championByKey["\(x.fixture)\u{0}\(x.model)"] else { return false }
+                return x.strictF1.mean < c.strictF1.mean - maxFixtureRegression
+            }?
+            .fixture
     }
 
     /// SE of the difference of two pooled means, converting each population stdev to the unbiased sample

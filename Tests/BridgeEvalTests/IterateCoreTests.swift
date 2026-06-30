@@ -201,4 +201,63 @@ final class IterateCoreTests: XCTestCase {
                                              challenger: AggregateF1(mean: 0.56, stdev: 0.0, n: 1))
         XCTAssertTrue(large.promoted)
     }
+
+    func testSelectWinnerLowNAsymmetric() {
+        // OR-branch: one side n>=2, the other n=1 → still the low-n floor (0.05), not the SE_diff margin.
+        let champion = AggregateF1(mean: 0.50, stdev: 0.1, n: 5)
+
+        // +0.02 < 0.05 low-n floor → retain (challenger n=1).
+        let small = IterateCore.selectWinner(champion: champion,
+                                             challenger: AggregateF1(mean: 0.52, stdev: 0.0, n: 1))
+        XCTAssertFalse(small.promoted)
+
+        // +0.06 >= 0.05 low-n floor → promote (challenger n=1).
+        let large = IterateCore.selectWinner(champion: champion,
+                                             challenger: AggregateF1(mean: 0.56, stdev: 0.0, n: 1))
+        XCTAssertTrue(large.promoted)
+    }
+
+    // MARK: - selectWinner per-fixture regression guard (condition 3)
+
+    private func fixtureStats(fixture: String, strictMean: Double, model: String = "m") -> FixtureModelStats {
+        FixtureModelStats(fixture: fixture, model: model,
+                          strictF1: AggregateF1(mean: strictMean, stdev: 0, n: 5),
+                          lenientF1: AggregateF1(mean: strictMean, stdev: 0, n: 5),
+                          outputConsistency: 1.0, catastrophicRate: 0.0)
+    }
+
+    func testSelectWinnerBlocksPromotionOnPerFixtureRegression() {
+        // Pooled mean rises (0.5→0.7, clears conditions 1+2) but fixture "alpha" craters 0.9→0.4
+        // (−0.5, far beyond the 0.05 margin) → overfitting → block, naming "alpha".
+        let champion = AggregateF1(mean: 0.5, stdev: 0.05, n: 10)
+        let challenger = AggregateF1(mean: 0.7, stdev: 0.05, n: 10)
+        let championFixtures = [fixtureStats(fixture: "alpha", strictMean: 0.9),
+                                fixtureStats(fixture: "beta", strictMean: 0.1)]
+        let challengerFixtures = [fixtureStats(fixture: "alpha", strictMean: 0.4),
+                                  fixtureStats(fixture: "beta", strictMean: 0.9)]
+
+        let decision = IterateCore.selectWinner(
+            champion: champion, challenger: challenger,
+            championFixtures: championFixtures, challengerFixtures: challengerFixtures)
+
+        XCTAssertFalse(decision.promoted)
+        XCTAssertEqual(decision.blockingFixture, "alpha")
+    }
+
+    func testSelectWinnerPromotesWhenAllFixturesWithinMargin() {
+        // Pooled mean rises and no fixture drops more than 0.05 below the champion → promote.
+        let champion = AggregateF1(mean: 0.5, stdev: 0.05, n: 10)
+        let challenger = AggregateF1(mean: 0.7, stdev: 0.05, n: 10)
+        let championFixtures = [fixtureStats(fixture: "alpha", strictMean: 0.6),
+                                fixtureStats(fixture: "beta", strictMean: 0.4)]
+        let challengerFixtures = [fixtureStats(fixture: "alpha", strictMean: 0.58),  // −0.02, within margin
+                                  fixtureStats(fixture: "beta", strictMean: 0.9)]
+
+        let decision = IterateCore.selectWinner(
+            champion: champion, challenger: challenger,
+            championFixtures: championFixtures, challengerFixtures: challengerFixtures)
+
+        XCTAssertTrue(decision.promoted)
+        XCTAssertNil(decision.blockingFixture)
+    }
 }
