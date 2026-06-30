@@ -2,6 +2,14 @@ import XCTest
 @testable import bridge_eval
 import HealthBridgeParsing
 
+/// Minimal extractor stub returning a fixed reply; the hash-consistency test only inspects the
+/// RawArtifact's promptHash, which is derived from the prompt regardless of the reply.
+private struct StubExtractor: LLMExtractor {
+    func extract(_ request: LLMRequest) async throws -> LLMRawResponse {
+        LLMRawResponse(jsonText: "{}")
+    }
+}
+
 final class IterateCoreTests: XCTestCase {
     /// Pattern C: a fresh temp dir per test, cleaned up after.
     private func makeTempDir() throws -> URL {
@@ -259,5 +267,28 @@ final class IterateCoreTests: XCTestCase {
 
         XCTAssertTrue(decision.promoted)
         XCTAssertNil(decision.blockingFixture)
+    }
+
+    // MARK: - promptHash consistency (render-once / hash-the-sent-string — the gotcha, §4.6)
+
+    func testIterateManifestHashMatchesObservedArtifactHashForOverride() async throws {
+        let pages = ["Heart rate 72.5 /min on 2024-01-15"]
+        let template = "EXTRACT CAREFULLY:\n{{DOCUMENT}}\nEND"
+
+        // Render the override ONCE, hash THAT string for the manifest, then pass THAT SAME string as
+        // promptOverride. Because it is the identical String value, runCase's internal promptHash is
+        // byte-identical by construction → no default make() hash leaks into the manifest.
+        let rendered = IterateCore.renderPrompt(template: template, pages: pages)
+        let manifestPromptHashes = [Hashing.promptHash(rendered)]
+
+        let now = LLMResponseContract.parseDate("2026-06-24")!
+        let (raw, _) = try await RunCore.runCase(
+            pdfData: Data("%PDF".utf8), pages: pages, model: "m", fixture: "f", sample: 0,
+            extractor: StubExtractor(), expected: ExpectedDoc(patients: [], observations: []),
+            subjectId: "subj", now: now, promptOverride: rendered)
+
+        // The manifest's hashes contain exactly the observed artifact hash, and NOT the default-prompt hash.
+        XCTAssertEqual(manifestPromptHashes, [raw.promptHash])
+        XCTAssertNotEqual(raw.promptHash, Hashing.promptHash(ExtractionPrompt.make(pages: pages)))
     }
 }
