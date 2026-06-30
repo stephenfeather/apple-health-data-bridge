@@ -53,4 +53,17 @@ final class IterateCoreTests: XCTestCase {
                            .placeholderCount(variantId: "dup", found: 2))
         }
     }
+
+    // MARK: - renderPrompt
+
+    func testRenderPromptSubstitutesPageNumberedDocumentBlock() {
+        let template = "PROMPT HEADER\nBEGIN\n{{DOCUMENT}}\nEND"
+        let pages = ["first page text", "second page text"]
+
+        let rendered = IterateCore.renderPrompt(template: template, pages: pages)
+
+        XCTAssertTrue(rendered.contains("----- PAGE 1 -----\nfirst page text"))
+        XCTAssertTrue(rendered.contains("----- PAGE 2 -----\nsecond page text"))
+        XCTAssertFalse(rendered.contains("{{DOCUMENT}}"))
+    }
 }

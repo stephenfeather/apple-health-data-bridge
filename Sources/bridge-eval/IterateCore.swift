@@ -40,4 +40,15 @@ enum IterateCore {
     private static func placeholderCount(in template: String) -> Int {
         template.components(separatedBy: documentPlaceholder).count - 1
     }
+
+    /// Render a per-fixture prompt by substituting the page-numbered document block for the single
+    /// `{{DOCUMENT}}` placeholder (plan §4.1, §4.5). The block format MUST stay byte-identical to
+    /// `ExtractionPrompt.make` so a `renderPrompt`-rendered variant and the `make()`-rendered baseline
+    /// inject the same document — Task 3b's golden test is the drift tripwire if `make()` ever changes.
+    static func renderPrompt(template: String, pages: [String]) -> String {
+        let document = pages.enumerated()
+            .map { "----- PAGE \($0.offset + 1) -----\n\($0.element)" }
+            .joined(separator: "\n")
+        return template.replacingOccurrences(of: documentPlaceholder, with: document)
+    }
 }
