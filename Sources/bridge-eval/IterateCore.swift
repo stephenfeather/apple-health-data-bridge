@@ -88,10 +88,15 @@ enum IterateCore {
                                   reason: "retain: Δmean \(deltaMean) below absolute floor \(minImprovement)")
         }
 
-        // n<2 → sample variance is undefined; the low-n floor lands in Task 5b. Minimal stub for now.
+        // Low-n trap (n<2): population stdev of a single sample is 0, so SE_diff collapses to 0 and the
+        // n≥2 margin would promote on any positive jitter. Sample variance is undefined at n=1, so the
+        // noise margin is replaced by the larger minImprovementLowN floor (plan §4.2 condition 2 else-branch).
         guard champion.n >= 2, challenger.n >= 2 else {
-            return WinnerDecision(promoted: true, deltaMean: deltaMean, seDiff: 0, blockingFixture: nil,
-                                  reason: "promote: Δmean \(deltaMean) cleared absolute floor (low-n stub)")
+            let promoted = deltaMean >= minImprovementLowN
+            return WinnerDecision(promoted: promoted, deltaMean: deltaMean, seDiff: 0, blockingFixture: nil,
+                                  reason: promoted
+                                    ? "promote: Δmean \(deltaMean) cleared low-n floor \(minImprovementLowN)"
+                                    : "retain: Δmean \(deltaMean) below low-n floor \(minImprovementLowN)")
         }
 
         // Condition 2 — noise margin, using the Bessel-corrected sample variance.

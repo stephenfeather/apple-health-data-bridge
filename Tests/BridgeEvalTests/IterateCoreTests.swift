@@ -185,4 +185,20 @@ final class IterateCoreTests: XCTestCase {
         // SE_diff = sqrt(σ²/(n-1) + σ²/(n-1)) = sqrt(0.025²·2) = 0.0353553...
         XCTAssertEqual(decision.seDiff, (0.025 * 0.025 * 2).squareRoot(), accuracy: 1e-12)
     }
+
+    func testSelectWinnerLowNRequiresLargerAbsoluteFloor() {
+        // n=1 → population stdev 0 → SE_diff collapses to 0; the n>=2 margin would promote on any
+        // positive jitter. The low-n branch instead requires the larger minImprovementLowN floor (0.05).
+        let champion = AggregateF1(mean: 0.50, stdev: 0.0, n: 1)
+
+        // +0.02 clears the 0.01 absolute floor but NOT the 0.05 low-n floor → retain.
+        let small = IterateCore.selectWinner(champion: champion,
+                                             challenger: AggregateF1(mean: 0.52, stdev: 0.0, n: 1))
+        XCTAssertFalse(small.promoted)
+
+        // +0.06 clears the 0.05 low-n floor → promote.
+        let large = IterateCore.selectWinner(champion: champion,
+                                             challenger: AggregateF1(mean: 0.56, stdev: 0.0, n: 1))
+        XCTAssertTrue(large.promoted)
+    }
 }
