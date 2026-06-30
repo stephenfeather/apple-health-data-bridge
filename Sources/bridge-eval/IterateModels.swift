@@ -8,3 +8,15 @@ struct PromptVariant: Codable, Equatable {
     let id: String
     let template: String
 }
+
+/// The full outcome of a champion-vs-challenger comparison (`IterateCore.selectWinner`, plan §4.2). A
+/// superset of the journal's `DecisionRecord`: it additionally names the fixture that blocked a
+/// per-fixture regression (Task 5c) so the journal can record *why* a per-fixture-regressing challenger
+/// was held back. `blockingFixture` is nil unless condition 3 (per-fixture regression) fired.
+struct WinnerDecision: Codable, Equatable {
+    let promoted: Bool
+    let deltaMean: Double
+    let seDiff: Double
+    let blockingFixture: String?
+    let reason: String
+}

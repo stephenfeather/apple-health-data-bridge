@@ -66,4 +66,50 @@ enum IterateCore {
         let variance = values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(values.count)
         return AggregateF1(mean: mean, stdev: variance.squareRoot(), n: values.count)
     }
+
+    /// Noise-aware champion-vs-challenger decision (plan §4.2). Promote the challenger iff it clears an
+    /// absolute floor AND a noise margin (n≥2 branch here; the n<2 low-n guard and the per-fixture
+    /// regression guard arrive in Tasks 5b/5c via the defaulted trailing params). Ties and within-noise
+    /// gains retain the incumbent (intentional incumbency bias — do not churn the prompt on noise).
+    ///
+    /// `AggregateF1.stdev` is a POPULATION stdev (✓ Aggregator: variance = Σ(x-μ)²/n). Population stdev
+    /// underestimates uncertainty at small n, so it is converted to the unbiased sample variance
+    /// `sampleVar = sd_pop²·n/(n-1)` BEFORE forming the standard error of the difference (§4.2 Codex note):
+    ///   SE_diff = sqrt( sampleVar_c/n_c + sampleVar_x/n_x )  =  sqrt( sd_c²/(n_c-1) + sd_x²/(n_x-1) ).
+    static func selectWinner(champion: AggregateF1, challenger: AggregateF1,
+                             minImprovement: Double = 0.01,
+                             noiseThreshold: Double = 1.0,
+                             minImprovementLowN: Double = 0.05) -> WinnerDecision {
+        let deltaMean = challenger.mean - champion.mean
+
+        // Condition 1 — absolute floor (applies to every branch).
+        guard deltaMean >= minImprovement else {
+            return WinnerDecision(promoted: false, deltaMean: deltaMean, seDiff: 0, blockingFixture: nil,
+                                  reason: "retain: Δmean \(deltaMean) below absolute floor \(minImprovement)")
+        }
+
+        // n<2 → sample variance is undefined; the low-n floor lands in Task 5b. Minimal stub for now.
+        guard champion.n >= 2, challenger.n >= 2 else {
+            return WinnerDecision(promoted: true, deltaMean: deltaMean, seDiff: 0, blockingFixture: nil,
+                                  reason: "promote: Δmean \(deltaMean) cleared absolute floor (low-n stub)")
+        }
+
+        // Condition 2 — noise margin, using the Bessel-corrected sample variance.
+        let seDiff = standardErrorOfDifference(champion: champion, challenger: challenger)
+        guard deltaMean >= noiseThreshold * seDiff else {
+            return WinnerDecision(promoted: false, deltaMean: deltaMean, seDiff: seDiff, blockingFixture: nil,
+                                  reason: "retain: Δmean \(deltaMean) within noise margin \(noiseThreshold * seDiff)")
+        }
+
+        return WinnerDecision(promoted: true, deltaMean: deltaMean, seDiff: seDiff, blockingFixture: nil,
+                              reason: "promote: Δmean \(deltaMean) exceeds noise margin \(noiseThreshold * seDiff)")
+    }
+
+    /// SE of the difference of two pooled means, converting each population stdev to the unbiased sample
+    /// variance first (`sd_pop²·n/(n-1)`). Requires n≥2 on both sides (caller guards).
+    private static func standardErrorOfDifference(champion c: AggregateF1, challenger x: AggregateF1) -> Double {
+        let sampleVarC = c.stdev * c.stdev * Double(c.n) / Double(c.n - 1)
+        let sampleVarX = x.stdev * x.stdev * Double(x.n) / Double(x.n - 1)
+        return (sampleVarC / Double(c.n) + sampleVarX / Double(x.n)).squareRoot()
+    }
 }

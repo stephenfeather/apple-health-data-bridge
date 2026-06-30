@@ -137,4 +137,52 @@ final class IterateCoreTests: XCTestCase {
         XCTAssertFalse(agg.mean.isNaN)
         XCTAssertFalse(agg.stdev.isNaN)
     }
+
+    // MARK: - selectWinner (n>=2 margin rule)
+
+    func testSelectWinnerPromotesWhenGainExceedsNoiseMargin() {
+        // Δmean 0.2 clears both the absolute floor (0.01) and the noise margin (SE_diff ≈ 0.047).
+        let champion = AggregateF1(mean: 0.5, stdev: 0.1, n: 10)
+        let challenger = AggregateF1(mean: 0.7, stdev: 0.1, n: 10)
+
+        let decision = IterateCore.selectWinner(champion: champion, challenger: challenger)
+
+        XCTAssertTrue(decision.promoted)
+        XCTAssertEqual(decision.deltaMean, 0.2, accuracy: 1e-12)
+        XCTAssertNil(decision.blockingFixture)
+    }
+
+    func testSelectWinnerRetainsChampionWithinNoise() {
+        // Δmean 0.02 clears the absolute floor but is below noiseThreshold·SE_diff (≈ 0.1414).
+        let champion = AggregateF1(mean: 0.50, stdev: 0.2, n: 5)
+        let challenger = AggregateF1(mean: 0.52, stdev: 0.2, n: 5)
+
+        let decision = IterateCore.selectWinner(champion: champion, challenger: challenger)
+
+        XCTAssertFalse(decision.promoted)
+    }
+
+    func testSelectWinnerTieKeepsChampion() {
+        // Equal means → Δmean 0 fails the absolute floor → incumbency bias retains the champion.
+        let champion = AggregateF1(mean: 0.6, stdev: 0.1, n: 5)
+        let challenger = AggregateF1(mean: 0.6, stdev: 0.1, n: 5)
+
+        let decision = IterateCore.selectWinner(champion: champion, challenger: challenger)
+
+        XCTAssertFalse(decision.promoted)
+        XCTAssertEqual(decision.deltaMean, 0.0, accuracy: 1e-12)
+    }
+
+    func testSelectWinnerUsesSampleVarianceAtN2() {
+        // n=2, σ=0.025. Population SE_diff = σ = 0.025 → a +0.03 gain WOULD promote with raw population
+        // stdev. Sample-variance SE_diff = σ√2 ≈ 0.035355 → +0.03 must NOT promote. Proves Bessel applied.
+        let champion = AggregateF1(mean: 0.50, stdev: 0.025, n: 2)
+        let challenger = AggregateF1(mean: 0.53, stdev: 0.025, n: 2)
+
+        let decision = IterateCore.selectWinner(champion: champion, challenger: challenger)
+
+        XCTAssertFalse(decision.promoted)
+        // SE_diff = sqrt(σ²/(n-1) + σ²/(n-1)) = sqrt(0.025²·2) = 0.0353553...
+        XCTAssertEqual(decision.seDiff, (0.025 * 0.025 * 2).squareRoot(), accuracy: 1e-12)
+    }
 }
